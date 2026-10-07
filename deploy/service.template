@@ -1,0 +1,14 @@
+[Unit]
+Description=@APP_NAME@ (PWA offline-first + API de sincronización)
+After=network.target
+
+[Service]
+WorkingDirectory=@DIR@
+# La configuración (puerto, base de datos, zona horaria…) sale de @DIR@/.env
+ExecStart=@DIR@/ms start
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

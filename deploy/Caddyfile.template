@@ -1,0 +1,13 @@
+# --- @APP_NAME@ ---
+# Pega este bloque en tu Caddyfile (normalmente /etc/caddy/Caddyfile) y recarga Caddy. HTTPS es obligatorio para que
+# la app instalada y el funcionamiento sin conexión (Service Worker) funcionen. Caddy obtiene el certificado solo.
+@DOMAIN@ {
+    reverse_proxy 127.0.0.1:@PORT@
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+
+    encode gzip zstd
+}

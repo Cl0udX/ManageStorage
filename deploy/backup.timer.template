@@ -1,0 +1,11 @@
+[Unit]
+Description=Respaldo de @APP_NAME@ al terminar el día (hora del negocio)
+
+[Timer]
+# Zona horaria explícita: corre a la hora del negocio aunque el servidor esté en otra zona.
+OnCalendar=*-*-* @BACKUP_TIME@:00 @TIMEZONE@
+# Si el servidor estaba apagado a esa hora, lo hace al encender.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

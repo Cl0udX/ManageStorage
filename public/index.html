@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="{{LOCALE}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="{{THEME_COLOR}}">
+  <meta name="app-config" content="{{APP_CONFIG}}">
+  <title>{{APP_NAME}}</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/src/client/ui/app.css">
+</head>
+<body>
+  <section id="login-view" class="login" hidden>
+    <h1>{{APP_NAME}}</h1>
+    <p id="login-notice" class="banner" hidden>Tu sesión venció. Entra otra vez para continuar. Lo que tenías pendiente sigue guardado y se enviará al entrar.</p>
+    <form id="login-form" autocomplete="on">
+      <label>Usuario <input name="username" autocomplete="username" autocapitalize="none" required></label>
+      <label>Contraseña <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="big">Entrar</button>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="muted">La primera vez en cada celular o computador necesitas internet. Después puedes entrar sin conexión.</p>
+    </form>
+  </section>
+
+  <section id="clock-view" class="login" hidden>
+    <h1>Revisa la fecha y la hora</h1>
+    <p id="clock-msg"></p>
+    <p class="muted">Así queda cada venta en el día correcto. Para arreglarlo: en el iPhone, Ajustes → General → Fecha y hora → activa "Establecer automáticamente". En Android, Ajustes → Sistema → Fecha y hora → activa "Fecha y hora automáticas" y "Zona horaria automática".</p>
+    <button id="clock-retry" type="button" class="big">Ya la corregí</button>
+  </section>
+
+  <div id="app-view" hidden>
+    <header>
+      <div id="status" class="status" role="status">…</div>
+      <button id="sync-btn" type="button" class="secondary small">Sincronizar</button>
+    </header>
+    <p id="update-banner" class="banner" hidden></p>
+    <p id="install-banner" class="banner" hidden></p>
+    <p id="banner" class="banner" hidden></p>
+
+    <main>
+      <section id="tab-sell">
+        <h2>¿Qué vendiste?</h2>
+        <input id="search" type="search" placeholder="🔍 Buscar producto…" autocomplete="off" aria-label="Buscar producto">
+        <div id="sell-list" class="cards"></div>
+        <div class="checkout" id="checkout" hidden>
+          <div><span class="muted">Total</span> <strong id="cart-total">$0</strong></div>
+          <div class="row">
+            <button id="cart-clear" type="button" class="secondary">Borrar</button>
+            <button id="cart-pay" type="button" class="big">Cobrar</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-history" hidden>
+        <h2>Historial de ventas</h2>
+        <div id="history"></div>
+        <p><button id="history-more" type="button" class="secondary big" hidden>Ver días anteriores</button></p>
+      </section>
+
+      <section id="tab-products" hidden>
+        <div class="titlebar"><h2>Productos</h2><button id="add-product" type="button">+ Agregar producto</button></div>
+        <div id="product-list" class="cards"></div>
+        <div id="conflicts-box" hidden>
+          <h2>Hay que revisar</h2>
+          <p class="muted">Dos celulares cambiaron lo mismo sin conexión. Escoge cuál valor queda.</p>
+          <ul id="conflicts" class="list"></ul>
+        </div>
+        <div id="rejected-box" hidden>
+          <h2>No se pudieron guardar</h2>
+          <ul id="rejected" class="list"></ul>
+        </div>
+        <p class="muted" id="who"></p>
+        <p><button id="logout-btn" type="button" class="secondary">Cerrar sesión</button></p>
+      </section>
+
+      <section id="tab-profit" hidden>
+        <div class="weeknav">
+          <button id="week-prev" type="button" class="secondary" aria-label="Semana anterior">◀</button>
+          <strong id="week-label"></strong>
+          <button id="week-next" type="button" class="secondary" aria-label="Semana siguiente">▶</button>
+        </div>
+        <div id="profit-cards" class="stats"></div>
+        <h2>Plata de la semana</h2>
+        <div id="money-cards" class="stats"></div>
+        <h2>Por producto</h2>
+        <table><thead><tr><th>Producto</th><th class="num">Vendidos</th><th class="num">Ganancia</th></tr></thead><tbody id="profit-products"></tbody></table>
+        <div class="titlebar"><h2>Gastos</h2><button id="add-expense" type="button" class="secondary">+ Anotar gasto</button></div>
+        <ul id="expenses" class="list"></ul>
+      </section>
+    </main>
+
+    <nav class="tabs">
+      <button type="button" data-tab="sell" class="active">Vender</button>
+      <button type="button" data-tab="history">Historial</button>
+      <button type="button" data-tab="products">Productos</button>
+      <button type="button" data-tab="profit">Ganancias</button>
+    </nav>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="/src/client/ui/app.js"></script>
+</body>
+</html>

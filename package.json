@@ -1,0 +1,25 @@
+{
+  "name": "manage-storage",
+  "version": "0.1.0",
+  "description": "PWA offline-first de inventario, ventas y ganancias para pequeños negocios (Node.js + SQLite, sin dependencias).",
+  "keywords": [
+    "pwa",
+    "offline-first",
+    "inventory",
+    "pos",
+    "sqlite",
+    "nodejs",
+    "sync"
+  ],
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server/main.js",
+    "test": "node --test test/*.test.js",
+    "seed": "node scripts/seed.js",
+    "backup": "node scripts/backup.js"
+  }
+}

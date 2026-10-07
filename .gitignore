@@ -1,0 +1,38 @@
+# ── Secretos y configuración local (NUNCA se suben) ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Datos y respaldos (contienen información real del negocio) ──
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.db.gz
+*.sqlite
+*.sqlite3
+*-backups/
+ManageStorage-backups/
+
+# ── Notas privadas de despliegue (dominio, servidor, accesos de TU instalación) ──
+AGENTS.local.md
+README_Personal.md
+*.local.md
+.opencode/*.local.*
+
+# ── Dependencias y artefactos ──
+node_modules/
+*.log
+*.tmp
+*.partial
+.tmp-*
+
+# ── Sistema / editores ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
