@@ -854,3 +854,30 @@ test('higiene del repositorio: .env.example documenta toda variable que lee el c
   }
   assert.deepEqual(bad.filter((b) => !/IP \d+\.\d+\.\d+\.\d+$/.test(b) || !/^(src\/shared\/validate|docs\/)/.test(b)), [], 'datos privados en archivos versionables');
 });
+
+test('visor de datos: tablas con ancho natural y desplazamiento (no se aprietan) y vista de tarjetas con todos los campos', async () => {
+  const w = await world();
+  const port = 19_000 + Math.floor(Math.random() * 900);
+  const v = startViewer(w.dbFile, port);
+  try {
+    await w.device('A', 'owner');
+    assert.ok(await waitFor(() => v.out().includes('Visor de solo lectura')));
+    const t = /t=([0-9a-f]+)/.exec(v.out())[1];
+    const html = await (await fetch(`http://127.0.0.1:${port}/t/dispositivos?t=${t}`)).text();
+    assert.match(html, /white-space:nowrap/, 'las celdas no parten el texto');
+    assert.match(html, /width:max-content/, 'la tabla toma el ancho de su contenido y se desplaza');
+    assert.ok(!html.includes('overflow-wrap:anywhere;font-family'), 'ya no se aplastan las columnas');
+    assert.match(html, /title="[^"]+"/, 'valor completo al pasar el mouse');
+    assert.match(html, /v=cards/, 'hay botón para ver tarjetas');
+
+    const cards = await (await fetch(`http://127.0.0.1:${port}/t/dispositivos?t=${t}&v=cards`)).text();
+    assert.match(cards, /<div class="card">/);
+    assert.match(cards, /<th>usuario<\/th><td>owner<\/td>/);
+    assert.ok(!cards.includes('<th>tipo</th>'), 'un campo vacío (el cliente de pruebas no manda tipo) no aparece');
+    assert.ok(!cards.includes('<td class="nul"'), 'en tarjetas los campos vacíos se ocultan');
+    assert.match(cards, /campos vacíos ocultos/);
+    assert.match(cards, /v=table/, 'y se puede volver a la tabla');
+    const q = await (await fetch(`http://127.0.0.1:${port}/q?t=${t}&sql=${encodeURIComponent('select * from dispositivos')}&v=cards`)).text();
+    assert.match(q, /<div class="card">/, 'también en los resultados de una consulta');
+  } finally { v.p.kill(); await w.close(); }
+});

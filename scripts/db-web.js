@@ -22,19 +22,43 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const tables = () => db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type DESC, name").all().map((r) => r.name);
 const isView = (n) => db.prepare("SELECT type FROM sqlite_master WHERE name=?").get(n)?.type === 'view';
 
-function grid(rows) {
+function grid(rows, url) {
   if (!rows.length) return '<p><i>(sin filas)</i></p>';
   const cols = Object.keys(rows[0]);
-  const cell = (k, v) => (SECRET_COLS.has(k) ? '***' : v === null ? '<i>NULL</i>' : esc(typeof v === 'object' ? JSON.stringify(v) : v));
-  return `<div class="w"><table><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${cols.map((c) => `<td>${cell(c, r[c])}</td>`).join('')}</tr>`).join('')}</table></div>`;
+  const text = (k, v) => (SECRET_COLS.has(k) ? '***' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const cards = url?.searchParams.get('v') === 'cards';
+  let toggle = '';
+  if (url) {
+    const u = new URL(url); u.searchParams.set('v', cards ? 'table' : 'cards');
+    toggle = `<p class="tg"><a href="${esc(u.pathname + u.search)}">${cards ? '☰ Ver como tabla' : '🗂 Ver como tarjetas (una por fila, con todos los campos)'}</a></p>`;
+  }
+  if (cards) {
+    // Una tarjeta por fila: clave/valor en vertical, con el texto completo (los campos vacíos se ocultan).
+    return toggle + `<div class="cards">${rows.map((r) => {
+      const filled = cols.filter((c) => r[c] !== null && r[c] !== undefined);
+      return `<div class="card"><table class="kv">${filled.map((c) => `<tr><th>${esc(c)}</th><td>${esc(text(c, r[c]))}</td></tr>`).join('')}</table>${filled.length < cols.length ? `<small>(${cols.length - filled.length} campos vacíos ocultos)</small>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+  // Tabla: cada columna conserva su ancho natural (no se aprieta); si no cabe, se desplaza. Valor completo al pasar el mouse.
+  const cell = (k, v) => (v === null || v === undefined ? '<td class="nul" title="NULL">NULL</td>' : `<td title="${esc(text(k, v))}">${esc(text(k, v))}</td>`);
+  return toggle + `<div class="w"><table><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${cols.map((c) => cell(c, r[c])).join('')}</tr>`).join('')}</table></div>`;
 }
 
 function page(body, sql = '') {
   const nav = tables().map((t) => `<a href="/t/${esc(t)}?t=${TOKEN}">${esc(t)}</a>`).join(' · ');
   return `<!doctype html><meta charset="utf-8"><title>DB (solo lectura)</title><style>
-body{font:14px system-ui;margin:1rem;color:#1c1f1a}a{color:#14532d}.w{overflow:auto;max-width:100%}table{border-collapse:collapse}
-td,th{border:1px solid #ccc;padding:3px 8px;text-align:left;vertical-align:top;max-width:420px;overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:12px}
-th{background:#eef2ea;position:sticky;top:0}textarea{width:100%;height:5rem;font:12px ui-monospace,monospace}.err{color:#b91c1c}</style>
+body{font:14px system-ui;margin:1rem;color:#1c1f1a}a{color:#14532d}
+.w{overflow:auto;max-width:100%;max-height:72vh;border:1px solid #d6dad0}
+table{border-collapse:separate;border-spacing:0;width:max-content}
+td,th{border-right:1px solid #e3e6dd;border-bottom:1px solid #e3e6dd;padding:4px 10px;text-align:left;vertical-align:top;font-family:ui-monospace,monospace;font-size:12px;
+  white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
+th{background:#eef2ea;position:sticky;top:0;z-index:2}
+td:first-child,th:first-child{position:sticky;left:0;background:#f7f9f4;z-index:1}th:first-child{z-index:3}
+tr:hover td{background:#fffbe6}.nul{color:#9aa094;font-style:italic}
+.tg{margin:.4rem 0}.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:.8rem}
+.card{border:1px solid #d6dad0;border-radius:8px;padding:.5rem .7rem;background:#fcfdfb}.card small{color:#9aa094}
+.kv{width:100%}.kv th{position:static;background:none;color:#5d625a;width:38%;font-weight:600}.kv td,.kv th{white-space:normal;overflow-wrap:anywhere;max-width:none;border:0;border-bottom:1px solid #eef0e8}.kv td:first-child{position:static;background:none}
+textarea{width:100%;height:5rem;font:12px ui-monospace,monospace}.err{color:#b91c1c}</style>
 <h3>Base de datos · <small>solo lectura</small></h3><p><a href="/?t=${TOKEN}">Inicio</a> · ${nav}</p>
 <form action="/q"><input type="hidden" name="t" value="${TOKEN}"><textarea name="sql" placeholder="SELECT ...">${esc(sql)}</textarea><br><button>Ejecutar</button></form>${body}`;
 }
@@ -56,11 +80,11 @@ const server = http.createServer((req, res) => {
       const order = isView(m[1]) ? '1' : db.prepare(`PRAGMA table_info("${m[1]}")`).all().some((c) => c.name === 'seq') ? 'seq DESC' : 'rowid DESC';
       const rows = db.prepare(`SELECT * FROM "${m[1]}" ORDER BY ${order} LIMIT ? OFFSET ?`).all(PAGE, p * PAGE);
       const link = (n, label) => `<a href="/t/${m[1]}?t=${TOKEN}&p=${n}">${label}</a>`;
-      return send(200, page(`<h4>${esc(m[1])} <small>(${total} filas, más recientes primero)</small></h4><p>${p > 0 ? link(p - 1, '← nuevas') : ''} ${(p + 1) * PAGE < total ? link(p + 1, 'antiguas →') : ''}</p>${grid(rows)}`));
+      return send(200, page(`<h4>${esc(m[1])} <small>(${total} filas, más recientes primero)</small></h4><p>${p > 0 ? link(p - 1, '← nuevas') : ''} ${(p + 1) * PAGE < total ? link(p + 1, 'antiguas →') : ''}</p>${grid(rows, url)}`));
     }
     if (url.pathname === '/q') {
       const sql = url.searchParams.get('sql') ?? '';
-      try { return send(200, page(grid(db.prepare(sql).all().slice(0, 500)), sql)); }
+      try { return send(200, page(grid(db.prepare(sql).all().slice(0, 500), url), sql)); }
       catch (e) { return send(200, page(`<p class="err">${esc(e.message)}</p>`, sql)); }
     }
     return send(404, 'no encontrado');
