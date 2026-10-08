@@ -1,6 +1,7 @@
 // Visor web de SOLO LECTURA de la base de datos (tipo pgAdmin, mínimo). Se corre a demanda, no es un servicio.
 // Escucha únicamente en 127.0.0.1 y exige un token aleatorio en la URL; se usa por túnel SSH:
-//   ssh -t -L 8096:127.0.0.1:8096 <tu-servidor> "cd <carpeta-del-proyecto> && ./ms db-web"     (con -t, Ctrl+C también cierra el visor del servidor)
+//   ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -L 8096:127.0.0.1:8096 <tu-servidor> "cd <carpeta-del-proyecto> && ./ms db-web"
+//   (-t: Ctrl+C también cierra el visor del servidor · ServerAlive*: manda un "sigo aquí" cada 30 s para que el túnel no se corte por inactividad)
 // y abrir la URL con ?t=TOKEN que imprime. La BD se abre readOnly (SQLite rechaza cualquier escritura).
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
@@ -117,6 +118,6 @@ server.on('error', async (e) => {
 
 server.on('listening', () => {
   touch();
-  console.log(`Visor de solo lectura. Abre en tu equipo (con el túnel SSH activo):\n  http://127.0.0.1:${PORT}/?t=${TOKEN}\nCtrl+C para cerrar.`);
+  console.log(`Visor de solo lectura. Abre en tu equipo (con el túnel SSH activo):\n  http://127.0.0.1:${PORT}/?t=${TOKEN}\nCtrl+C para cerrar. Si el link deja de responder, el túnel SSH se cortó: ejecuta de nuevo el mismo comando.`);
 });
 server.listen(PORT, '127.0.0.1');

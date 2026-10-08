@@ -144,10 +144,28 @@ Todos con el lanzador `./ms`:
 | `./ms caddy` | Imprime la configuración de Caddy para tu dominio |
 | `./ms backup` · `./ms backup list` | Respaldo verificado y comprimido · listarlos |
 | `./ms db tables \| stock \| devices \| device <id> \| accesos \| ops N \| "SELECT …"` | Consultas de **solo lectura** (con vistas legibles en español) |
-| `./ms db-web` | Visor web de solo lectura (por túnel SSH, con token, se cierra solo) |
+| `./ms db-web` | Visor web de solo lectura (por túnel SSH, con token, se cierra solo; ver abajo) |
 | `./ms node scripts/admin.js …` | Anular ventas, archivar productos, nombrar equipos, zona horaria |
 | `./ms node scripts/reset-data.js --yes` | Borra los datos del negocio (con respaldo previo) |
 | `./ms test` | Ejecuta las pruebas |
+
+### Ver los datos desde tu equipo (visor web)
+
+```bash
+ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -L 8096:127.0.0.1:8096 <servidor> "cd <carpeta-del-proyecto> && ./ms db-web"
+```
+
+Abre la URL con `?t=…` que imprime. Es de solo lectura, exige ese token y se cierra solo tras 30 minutos sin uso.
+Si el link **deja de responder**, lo que se cortó es el túnel SSH (la conexión se queda sin tráfico y algo en el camino la cierra). Las opciones
+`ServerAliveInterval` mantienen la conexión viva; para tenerlas siempre, agrega a tu `~/.ssh/config`:
+
+```
+Host <servidor>
+    ServerAliveInterval 30
+    ServerAliveCountMax 4
+```
+
+Si aun así se cae, vuelve a ejecutar el mismo comando: el visor anterior se cierra solo y se abre uno nuevo (con otro token).
 
 ## Uso diario
 

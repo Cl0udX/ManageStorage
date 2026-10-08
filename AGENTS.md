@@ -42,7 +42,7 @@ systemctl --user restart <SERVICE_NAME>   # aplicar cambios de servidor (el fron
 ./ms backup                               # backup en caliente (VACUUM INTO)
 # Ver datos (SOLO LECTURA):
 ./ms db tables | schema [tabla] | stock | ops [N] | "SELECT ..."
-./ms db-web                               # visor web de solo lectura (túnel SSH con -t, ver README). Si el puerto lo ocupa un visor anterior, lo cierra y abre uno nuevo (nunca toca otro programa); se cierra solo tras 30 min sin uso
+./ms db-web                               # visor web de solo lectura (túnel SSH con `-t -o ServerAliveInterval=30`: sin keepalive el túnel se corta tras un rato de inactividad y el link «deja de responder»; ver README). Si el puerto lo ocupa un visor anterior, lo cierra y abre uno nuevo (nunca toca otro programa); se cierra solo tras 30 min sin uso
 # Usuarios (la clave entra por stdin, no por argumento):
 printf '%s' 'clave' | ./ms user <usuario> [--rename nuevo] [--role owner|staff]
 printf '%s' 'clave' | ./ms user --create <usuario> [--org "Nombre"] --role owner
