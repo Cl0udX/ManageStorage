@@ -49,11 +49,12 @@ export function reportBetween(records, start, end) {
 
 export const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-/** Historial de ventas agrupado por día (más reciente primero). Las anuladas se listan pero no suman. */
-export function salesByDay(records) {
+/** Historial agrupado por día (más reciente primero), para un tipo de registro: sale | purchase | expense. Las anuladas se listan pero no suman. */
+export function recordsByDay(records, kind = 'sale') {
+  const kinds = Array.isArray(kind) ? kind : [kind]; // uno o varios tipos (p. ej. ['purchase', 'adjustment'])
   const days = new Map();
   for (const r of records) {
-    if (r.kind !== 'sale') continue;
+    if (!kinds.includes(r.kind)) continue;
     const at = new Date(r.created_at);
     const key = dayKey(at);
     let d = days.get(key);
@@ -72,3 +73,25 @@ export function salesByDay(records) {
   return [...days.values()].sort((a, b) => b.date - a.date)
     .map((d) => ({ ...d, sales: d.sales.sort((a, b) => b.created_at.localeCompare(a.created_at)) }));
 }
+
+export const salesByDay = (records) => recordsByDay(records, 'sale');
+
+/**
+ * Rango [from, to) de un período del historial, en hora local: today | yesterday | week (lunes–domingo) | month |
+ * all (sin límites) | "YYYY-MM-DD" (un día específico).
+ */
+export function periodRange(period, now = new Date()) {
+  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  switch (period) {
+    case 'today': return { from: today, to: addDays(today, 1) };
+    case 'yesterday': return { from: addDays(today, -1), to: today };
+    case 'week': { const w = weekStart(now); return { from: w, to: addDays(w, 7) }; }
+    case 'month': return { from: new Date(today.getFullYear(), today.getMonth(), 1), to: new Date(today.getFullYear(), today.getMonth() + 1, 1) };
+    default: {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(period)) { const [y, m, d] = period.split('-').map(Number); const from = new Date(y, m - 1, d); return { from, to: addDays(from, 1) }; }
+      return { from: null, to: null };
+    }
+  }
+}
+
+export const inRange = (iso, { from, to }) => { const t = new Date(iso); return (!from || t >= from) && (!to || t < to); };

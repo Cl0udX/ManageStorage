@@ -33,7 +33,7 @@ saben de informática: pocas pantallas, textos simples y botones grandes.
 - 📴 **Funciona sin conexión**: abre, vende y registra aunque no haya internet; al volver la señal se envía todo automáticamente.
 - 🔁 **No pierde operaciones**: cada venta, compra o gasto es un hecho con identificador único. Si se reenvía, se aplica una sola vez; si se corta la conexión a mitad, se reintenta sin duplicar.
 - 📦 **Inventario confiable**: el stock siempre se calcula a partir de los movimientos (nunca es un número que se sobrescribe). Dos celulares vendiendo a la vez sin internet dan el resultado correcto.
-- 💰 **Costo, precio y ganancia semanal**: cada producto guarda cuánto cuesta y a cuánto se vende; el reporte semanal separa ventas, costo de lo vendido, gastos y ganancia.
+- 💰 **Costo, precio y ganancia semanal**: cada producto guarda cuánto cuesta y a cuánto se vende; el reporte semanal separa ventas, costo de lo vendido, gastos y ganancia. Cada compra lleva su propio costo (el del producto se promedia) y cada venta puede hacerse a otro precio; cambiar precios o costos **no altera las ventas ya hechas**.
 - 💵 **Efectivo vs. transferencia**: cada venta, gasto y compra indica cómo se pagó; la app muestra cuánto entró y salió por cada forma de pago.
 - 🧾 **Historial y anulaciones**: las ventas se pueden anular (con movimientos compensatorios; nada se borra).
 - 🤝 **Varios dispositivos y usuarios**: las ediciones se fusionan campo por campo; si dos equipos cambian lo mismo sin conexión, se guarda un conflicto con ambos valores para decidir.
@@ -172,8 +172,8 @@ Si aun así se cae, vuelve a ejecutar el mismo comando: el visor anterior se cie
 La app tiene cuatro pestañas:
 
 - **Vender**: buscador, productos con `+` / `−`, y *Cobrar*, que pide confirmar y elegir **Efectivo** o **Transferencia**.
-- **Historial**: ventas por día, con el total por forma de pago; se pueden anular.
-- **Productos**: agregar (nombre, costo, precio, cantidad), cambiar, *Llegó mercancía*, *Corregir cantidad*, quitar.
+- **Historial**: pestañas **Ventas / Mercancía / Gastos** (mercancía = compras e inventario inicial), filtros por **período** (hoy, ayer, semana, mes, todo o un día específico), por producto y por forma de pago, con el resumen del período. Cada registro es una tarjeta con sus productos uno por línea. La mercancía se puede **corregir** (cantidad o costo) o anular, y los gastos anular.
+- **Productos**: agregar (nombre, costo, precio, cantidad), *Llegó mercancía*, *Precio*, *Movimientos* (historial de ese producto), quitar, y un lápiz ✏️ para renombrar. El costo y la cantidad no se editan directo: se corrigen entrada por entrada desde el historial de mercancía, para que el inventario y el costo promedio siempre cuadren. Anular y quitar piden escribir «confirmar».
 - **Ganancias**: por semana (lunes–domingo): ganancia, ventas, costo de lo vendido, gastos, plata en efectivo y en transferencias, y ganancia por producto.
 
 Roles: **dueño** (todo, incluido resolver conflictos y desactivar equipos) y **empleado** (vender y registrar).

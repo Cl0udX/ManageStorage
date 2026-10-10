@@ -35,11 +35,11 @@ export class SyncEngine {
   }
 
   // ---------- Escritura local (siempre funciona, online u offline) ----------
-  async enqueue(op_type, entity_type, entity_id, payload, base_version = null) {
+  async enqueue(op_type, entity_type, entity_id, payload, base_version = null, created_at = null) {
     const op = await this.store.enqueueOp({
       op_id: this.uuid(), device_id: this.deviceId, user_id: this.userId,
       entity_type, entity_id, op_type, payload, base_version,
-      created_at: this.now().toISOString(), status: 'pending',
+      created_at: created_at ?? this.now().toISOString(), status: 'pending',
     });
     this.onChange();
     return op;
@@ -58,24 +58,28 @@ export class SyncEngine {
 
   sale(lines, extra = {}) { return this.enqueue(OP.SALE_CREATE, 'sale', this.uuid(), { lines, ...extra }); }
   purchase(lines, extra = {}) { return this.enqueue(OP.PURCHASE_CREATE, 'purchase', this.uuid(), { lines, ...extra }); }
-  adjustStock(product_id, delta, reason) { return this.enqueue(OP.STOCK_ADJUST, 'adjustment', this.uuid(), { product_id, delta, reason }); }
+  /** `unit_cost` (opcional, solo entradas): costo por unidad de esta entrada de inventario; entra al costo promedio. */
+  adjustStock(product_id, delta, reason, unit_cost) {
+    return this.enqueue(OP.STOCK_ADJUST, 'adjustment', this.uuid(), { product_id, delta, reason, ...(unit_cost !== undefined ? { unit_cost } : {}) });
+  }
   expense(amount, description, extra = {}) { return this.enqueue(OP.EXPENSE_CREATE, 'expense', this.uuid(), { amount, description, ...extra }); }
   /** Vende productos del catálogo: toma precio y costo vigentes de la vista local. items: [{product_id, qty}] */
   async sellProducts(items, extra = {}) {
     const view = await this.getView();
-    const lines = items.map(({ product_id, qty }) => {
+    const lines = items.map(({ product_id, qty, unit_price }) => {
       const p = view.entities.product[product_id];
       if (!p) throw new Error(`unknown product ${product_id}`);
-      return { product_id, qty, unit_price: p.price, unit_cost: p.cost ?? 0 };
+      // unit_price opcional: precio de ESTA venta (descuento, otro precio). El precio del producto no cambia.
+      return { product_id, qty, unit_price: unit_price ?? p.price, unit_cost: p.cost ?? 0 };
     });
     return this.sale(lines, extra);
   }
 
-  /** "Llegó mercancía": suma cantidad al costo vigente del producto. */
-  async restock(product_id, qty, extra = {}) {
+  /** "Llegó mercancía": `unit_cost` = lo que costó cada unidad EN ESTA compra (por defecto, el costo actual del producto). */
+  async restock(product_id, qty, { unit_cost, ...extra } = {}) {
     const p = (await this.getView()).entities.product[product_id];
     if (!p) throw new Error(`unknown product ${product_id}`);
-    return this.purchase([{ product_id, qty, unit_cost: p.cost ?? 0 }], extra);
+    return this.purchase([{ product_id, qty, unit_cost: unit_cost ?? p.cost ?? 0 }], extra);
   }
 
   /** "Corregir cantidad": deja el stock en `newQty` registrando la diferencia como ajuste. */
@@ -83,6 +87,23 @@ export class SyncEngine {
     const cur = (await this.getView()).stock[product_id] ?? 0;
     if (newQty === cur) return null;
     return this.adjustStock(product_id, newQty - cur, reason);
+  }
+
+  /**
+   * Corregir una compra (cantidad o costo equivocados): se ANULA la anterior (el stock y el costo del producto vuelven a lo que eran)
+   * y se registra la correcta con la fecha original, para que siga contando en la semana en que realmente llegó. Nada se borra.
+   */
+  async correctPurchase(rec, { qty, unit_cost, payment_method_id }) {
+    const line = rec.lines[0];
+    await this.voidOp(rec.op_id, 'corrección de compra');
+    return this.enqueue(OP.PURCHASE_CREATE, 'purchase', this.uuid(), { lines: [{ product_id: line.product_id, qty, unit_cost }], payment_method_id }, null, rec.created_at);
+  }
+
+  /** Corregir un movimiento de inventario (p. ej. el "inventario inicial" mal escrito): se anula y se registra el correcto con la fecha original. */
+  async correctAdjustment(rec, delta, unit_cost) {
+    const line = rec.lines[0];
+    await this.voidOp(rec.op_id, 'corrección');
+    return this.enqueue(OP.STOCK_ADJUST, 'adjustment', this.uuid(), { product_id: line.product_id, delta, reason: rec.note || 'corrección', ...(unit_cost !== undefined ? { unit_cost } : {}) }, null, rec.created_at);
   }
 
   voidOp(target_op_id, reason) { return this.enqueue(OP.OP_VOID, 'void', this.uuid(), { target_op_id, reason }); }

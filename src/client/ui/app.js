@@ -3,12 +3,17 @@ import { IdbStore } from '../persistence/idb-store.js';
 import { ApiClient, ApiError } from '../api/api-client.js';
 import { SyncEngine } from '../sync/engine.js';
 import { login, refreshToken, LocalAuthError } from '../auth/session.js';
-import { weeklyReport, reportBetween, weekStart, addDays, salesByDay } from '../../domain/report.js';
+import { weeklyReport, reportBetween, weekStart, addDays, recordsByDay, periodRange, inRange } from '../../domain/report.js';
 import { PAYMENT_METHODS, RECORD_RETENTION_DAYS } from '../../shared/constants.js';
 import { getClientInfo } from './client-info.js';
 import { appConfig } from '../config.js';
+import { weightedAverageCost } from '../../domain/state.js';
+import { CONFIRM_WORD, isConfirmation } from './confirm.js';
 import { checkClock } from '../clock.js';
 import { protectStorage, shouldSuggestInstall } from '../storage-guard.js';
+
+// SIN ZOOM: iOS Safari manda el pellizco como eventos "gesture*"; se cancelan (junto con el viewport y touch-action del CSS).
+for (const t of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 
 const $ = (id) => document.getElementById(id);
 const store = new IdbStore();
@@ -27,8 +32,9 @@ let weekOffset = 0;
 let clockBlocked = false;     // la hora/zona del equipo no es la correcta (con internet no se deja usar)
 const weekCache = new Map(); // semanas más antiguas que lo guardado en el equipo, pedidas al servidor
 let searchTerm = '';
-let historyDays = 7;
+let historyDays = 14;
 const cart = new Map();
+let currentView = null; // última vista pintada (para actualizar el total sin redibujar la lista)
 
 const money = (n) => new Intl.NumberFormat(appConfig.locale, { style: 'currency', currency: appConfig.currency, maximumFractionDigits: 0 }).format(n);
 const METHOD_NAME = { 'pm-cash': 'Efectivo', 'pm-transfer': 'Transferencia', none: 'Sin indicar' };
@@ -46,7 +52,7 @@ const btn = (text, onclick, cls = '') => el('button', { type: 'button', textCont
 function appendFields(form, fields) {
   for (const f of fields) {
     const input = el('input', {
-      name: f.name, type: f.type ?? 'text', value: f.value ?? '', required: f.required !== false,
+      name: f.name, type: f.type ?? 'text', value: f.value ?? '', required: f.required !== false, readOnly: !!f.readonly,
       ...(f.type === 'number' ? { min: f.min ?? 0, step: 1, inputMode: 'numeric' } : {}),
       ...(f.type === 'password' ? { autocomplete: 'current-password' } : {}),
     });
@@ -105,6 +111,27 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2500);
 }
 const confirmBox = async (title, yes = 'Sí') => (await askForm(title, [], yes)) !== null;
+/** Confirmación ESCRITA: el botón queda apagado hasta que la persona escriba "confirmar". Para Anular y Quitar. */
+function confirmTyped({ title, detail, action }) {
+  return new Promise((resolve) => {
+    const dlg = el('dialog');
+    const form = el('form');
+    form.append(el('h3', { textContent: title }), el('p', { textContent: detail }));
+    const input = el('input', { type: 'text', autocomplete: 'off', autocapitalize: 'none', spellcheck: false, placeholder: CONFIRM_WORD });
+    input.setAttribute('autocorrect', 'off');
+    input.setAttribute('aria-label', `Escribe ${CONFIRM_WORD} para continuar`);
+    form.append(el('label', {}, `Para continuar, escribe "${CONFIRM_WORD}"`, input));
+    const go = el('button', { type: 'submit', textContent: action, className: 'danger', disabled: true });
+    input.addEventListener('input', () => { go.disabled = !isConfirmation(input.value); });
+    form.append(el('div', { className: 'row' }, btn('Cancelar', () => dlg.close('cancel'), 'secondary'), go));
+    form.addEventListener('submit', (ev) => { ev.preventDefault(); if (isConfirmation(input.value)) dlg.close('ok'); });
+    dlg.append(form);
+    dlg.addEventListener('close', () => { dlg.remove(); resolve(dlg.returnValue === 'ok'); });
+    document.body.append(dlg);
+    dlg.showModal();
+    input.focus();
+  });
+}
 const okInt = (n) => Number.isSafeInteger(n) && n >= 0;
 
 // ---------- Arranque ----------
@@ -267,6 +294,7 @@ async function autoSync() {
 async function render() {
   if (!engine) return;
   const view = await engine.getView();
+  currentView = view;
   const st = await engine.stats();
   renderStatus(st);
   renderSell(view);
@@ -299,32 +327,53 @@ function renderStatus(st) {
 const activeProducts = (view) => Object.values(view.entities.product).filter((p) => !p.archived).sort((a, b) => a.name.localeCompare(b.name, appConfig.locale));
 const productName = (view, id) => view.entities.product[id]?.name ?? 'Producto';
 
-function renderSell(view) {
-  const list = $('sell-list'); list.replaceChildren();
-  const all = activeProducts(view);
-  const q = norm(searchTerm.trim());
-  const products = q ? all.filter((p) => norm(p.name).includes(q)) : all;
-  if (!all.length) list.append(el('p', { className: 'muted', textContent: 'Todavía no hay productos. Ve a "Productos" y agrega el primero.' }));
-  else if (!products.length) list.append(el('p', { className: 'muted', textContent: `No encontré "${searchTerm.trim()}".` }));
-
-  // El total cuenta TODO el carrito, aunque el buscador esté filtrando.
+function cartTotals(view) {
   let total = 0, units = 0;
   for (const [id, qty] of [...cart]) {
     const p = view.entities.product[id];
     if (!p || p.archived) { cart.delete(id); continue; }
     total += qty * p.price; units += qty;
   }
+  return { total, units };
+}
+
+/** Solo la barra de Total/Borrar/Cobrar (sin redibujar la lista: así no se cierra el teclado mientras escriben). */
+function updateCheckout(view = currentView) {
+  if (!view) return;
+  const { total, units } = cartTotals(view);
+  $('checkout').hidden = units === 0;
+  $('cart-total').textContent = money(total);
+}
+
+const setCart = (id, n) => { if (n > 0) cart.set(id, n); else cart.delete(id); };
+
+function renderSell(view) {
+  const list = $('sell-list');
+  // Si la persona está escribiendo una cantidad, no se redibuja la lista (se cerraría el teclado): solo se actualiza el total.
+  if (list.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return updateCheckout(view);
+  list.replaceChildren();
+  const all = activeProducts(view);
+  const q = norm(searchTerm.trim());
+  const products = q ? all.filter((p) => norm(p.name).includes(q)) : all;
+  if (!all.length) list.append(el('p', { className: 'muted', textContent: 'Todavía no hay productos. Ve a "Productos" y agrega el primero.' }));
+  else if (!products.length) list.append(el('p', { className: 'muted', textContent: `No encontré "${searchTerm.trim()}".` }));
+
+  updateCheckout(view); // el total cuenta TODO el carrito, aunque el buscador esté filtrando
   for (const p of products) {
     const qty = cart.get(p.id) ?? 0;
     const stock = view.stock[p.id] ?? 0;
-    const bump = (d) => { const n = Math.max(0, (cart.get(p.id) ?? 0) + d); if (n) cart.set(p.id, n); else cart.delete(p.id); render(); };
+    const bump = (d) => { setCart(p.id, Math.max(0, (cart.get(p.id) ?? 0) + d)); render(); };
+    // La cantidad se puede ESCRIBIR (no hace falta tocar + muchas veces); + y − siguen funcionando.
+    const input = el('input', { className: 'qty-input', type: 'number', inputMode: 'numeric', min: 0, step: 1, value: String(qty) });
+    input.setAttribute('aria-label', `Cantidad de ${p.name}`);
+    input.addEventListener('focus', () => input.select());
+    input.addEventListener('input', () => { const n = Number.parseInt(input.value, 10); setCart(p.id, Number.isSafeInteger(n) && n > 0 ? n : 0); updateCheckout(); });
+    input.addEventListener('blur', () => { input.value = String(cart.get(p.id) ?? 0); });
     list.append(el('div', { className: `card ${stock <= 0 ? 'low' : ''}` },
       el('div', {}, el('div', { className: 'name', textContent: p.name }),
         el('div', { className: 'meta' }, `${money(p.price)} · Quedan `, el('span', { className: 'qty', textContent: String(stock) }))),
-      el('div', { className: 'stepper' }, btn('−', () => bump(-1), 'secondary'), el('output', { textContent: String(qty) }), btn('+', () => bump(1)))));
+      el('div', { className: 'stepper' }, btn('−', () => bump(-1), 'secondary'), input, btn('+', () => bump(1)))));
   }
-  $('checkout').hidden = units === 0;
-  $('cart-total').textContent = money(total);
 }
 
 function dayLabel(date) {
@@ -335,26 +384,151 @@ function dayLabel(date) {
   return date.toLocaleDateString(appConfig.locale, { weekday: 'long', day: 'numeric', month: 'long' });
 }
 
+// Filtros del historial: tipo, período, forma de pago y texto.
+//   sale = ventas · merch = mercancía (compras + inventario inicial + ajustes/conteos) · expense = gastos
+let historyKind = 'sale';
+let historyPeriod = 'week'; // today | yesterday | week | month | all | YYYY-MM-DD
+let historyMethod = 'all';
+let historySearch = '';
+const KIND_RECORDS = { sale: ['sale'], merch: ['purchase', 'adjustment'], expense: ['expense'] };
+const KIND_NOUN = { sale: ['venta', 'ventas'], merch: ['movimiento', 'movimientos'], expense: ['gasto', 'gastos'] };
+const hourOf = (r) => new Date(r.created_at).toLocaleTimeString(appConfig.locale, { hour: 'numeric', minute: '2-digit' });
+const adjustLabel = (r) => { const n = (r.note ?? '').toLowerCase(); return n === 'inventario inicial' ? 'Inventario inicial' : n === 'conteo' ? 'Conteo' : r.note || 'Ajuste'; };
+const shortDate = (d) => d.toLocaleDateString(appConfig.locale, { day: 'numeric', month: 'short' });
+
+function periodLabel() {
+  const r = periodRange(historyPeriod);
+  switch (historyPeriod) {
+    case 'today': return 'Hoy';
+    case 'yesterday': return 'Ayer';
+    case 'week': return `Semana del ${shortDate(r.from)} al ${shortDate(addDays(r.to, -1))}`;
+    case 'month': return r.from.toLocaleDateString(appConfig.locale, { month: 'long', year: 'numeric' });
+    case 'all': return 'Todo lo guardado en este equipo';
+    default: return r.from.toLocaleDateString(appConfig.locale, { weekday: 'long', day: 'numeric', month: 'long' });
+  }
+}
+
+function historyCard(view, r) {
+  const adj = r.kind === 'adjustment';
+  const delta = adj ? r.lines[0].delta : 0;
+  const units = r.lines.reduce((sum, l) => sum + (adj ? Math.abs(l.delta) : l.qty), 0);
+  const label = { sale: 'esta venta', purchase: 'esta compra', adjustment: 'este movimiento', expense: 'este gasto' }[r.kind];
+  const single = r.lines.length === 1;
+  const actions = r.voided ? el('span', { className: 'muted', textContent: 'Anulada' }) : el('span', { className: 'actions' },
+    (r.kind === 'purchase' || adj) && single ? btn('Corregir', () => (adj ? correctAdjustmentDialog(r) : correctPurchaseDialog(r)), 'secondary small') : '',
+    btn('Anular', () => voidRecord(r, label), 'secondary small'));
+  const headline = adj ? `${delta > 0 ? '+' : '−'}${Math.abs(delta)} unidades` : money(r.amount);
+  const tag = adj ? adjustLabel(r) : r.kind === 'purchase' ? `Compra · ${methodName(r.payment_method_id)}` : methodName(r.payment_method_id);
+  const head = el('div', { className: 'sale-head' },
+    el('span', { className: r.voided ? 'void' : '' }, el('strong', { textContent: hourOf(r) }), ' · ', el('strong', { textContent: headline }),
+      el('span', { className: 'badge', textContent: tag }), r.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''), actions);
+  let body;
+  if (r.kind === 'expense') body = el('div', { className: `sale-items ${r.voided ? 'void' : ''}` }, el('div', { className: 'line' }, el('span', { className: 'what', textContent: r.note || 'Gasto' })));
+  else if (adj) body = el('div', { className: `sale-items ${r.voided ? 'void' : ''}` }, ...r.lines.map((l) => el('div', { className: 'line' },
+    el('span', { className: 'what', textContent: `${l.delta > 0 ? '+' : '−'}${Math.abs(l.delta)} × ${productName(view, l.product_id)}` }),
+    el('span', { className: 'muted', textContent: l.unit_cost !== undefined ? `${money(l.unit_cost)} c/u · ${money(Math.abs(l.delta) * l.unit_cost)}` : l.delta > 0 ? 'entran al inventario' : 'salen del inventario' }))));
+  else {
+    // Cada producto en SU línea: así una venta con muchos productos se lee completa.
+    const price = r.kind === 'purchase' ? 'unit_cost' : 'unit_price';
+    body = el('div', { className: `sale-items ${r.voided ? 'void' : ''}` }, ...r.lines.map((l) => el('div', { className: 'line' },
+      el('span', { className: 'what', textContent: `${l.qty} × ${productName(view, l.product_id)}` }),
+      el('span', { className: 'muted', textContent: `${money(l[price])} c/u · ${money(l.qty * l[price])}` }))));
+  }
+  const notes = [];
+  if (r.kind === 'purchase' || adj) for (const l of r.lines) if (l.cost_before !== undefined && l.cost_before !== l.cost_after) notes.push(el('div', { className: 'sale-note', textContent: `Costo de ${productName(view, l.product_id)}: ${money(l.cost_before)} → ${money(l.cost_after)}` }));
+  const foot = r.lines.length > 1 ? el('div', { className: 'sale-foot', textContent: `${r.lines.length} productos · ${units} unidades` }) : '';
+  return el('li', { className: `sale ${r.kind === 'sale' && single ? 'small' : ''}` }, head, body, ...notes, foot);
+}
+
 function renderHistory(view) {
   const box = $('history'); box.replaceChildren();
-  const days = salesByDay(Object.values(view.records));
-  if (!days.length) box.append(el('p', { className: 'muted', textContent: 'Aún no hay ventas.' }));
-  for (const d of days.slice(0, historyDays)) {
-    const parts = Object.entries(d.byMethod).map(([m, v]) => `${methodName(m)} ${money(v)}`).join(' · ');
-    box.append(el('div', { className: 'dayhead' }, el('strong', { textContent: dayLabel(d.date) }), el('span', { className: 'muted', textContent: ` · ${money(d.total)}${parts ? ` (${parts})` : ''}` })));
-    const ul = el('ul', { className: 'list' });
-    for (const r of d.sales) {
-      const hour = new Date(r.created_at).toLocaleTimeString(appConfig.locale, { hour: 'numeric', minute: '2-digit' });
-      const what = r.lines.map((l) => `${l.qty} × ${productName(view, l.product_id)}`).join(', ');
-      ul.append(el('li', {},
-        el('span', { className: r.voided ? 'void' : '' }, `${hour} · ${what} · ${money(r.amount)}`,
-          el('span', { className: 'badge', textContent: methodName(r.payment_method_id) }), r.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''),
-        r.voided ? el('span', { className: 'muted', textContent: 'Anulada' }) : btn('Anular', () => voidRecord(r, 'esta venta'), 'secondary small')));
-    }
-    box.append(ul);
+  document.querySelectorAll('#history-kind button').forEach((b) => b.classList.toggle('active', b.dataset.kind === historyKind));
+  const custom = /^\d{4}-\d{2}-\d{2}$/.test(historyPeriod);
+  document.querySelectorAll('#history-period button').forEach((b) => b.classList.toggle('active', !custom && b.dataset.period === historyPeriod));
+  $('history-daychip').classList.toggle('active', custom);
+  $('history-day-label').textContent = custom ? ` ${shortDate(periodRange(historyPeriod).from)}` : '';
+  $('history-search').placeholder = historyKind === 'expense' ? '🔍 Buscar un gasto…' : '🔍 Buscar un producto…';
+
+  const range = periodRange(historyPeriod);
+  const q = norm(historySearch.trim());
+  const text = (r) => (r.kind === 'expense' ? (r.note ?? '') : `${r.lines.map((l) => productName(view, l.product_id)).join(' ')} ${r.kind === 'adjustment' ? adjustLabel(r) : ''}`);
+  const match = (r) => inRange(r.created_at, range) && (historyMethod === 'all' || (r.payment_method_id ?? 'none') === historyMethod) && (!q || norm(text(r)).includes(q));
+  const [one, many] = KIND_NOUN[historyKind];
+  const days = recordsByDay(Object.values(view.records), KIND_RECORDS[historyKind]).map((d) => ({ ...d, sales: d.sales.filter(match) })).filter((d) => d.sales.length);
+
+  // Resumen de lo que se está viendo (las anuladas no suman; el dinero solo cuenta ventas, compras y gastos)
+  const live = days.flatMap((d) => d.sales).filter((r) => !r.voided);
+  const byMethod = {};
+  for (const r of live) if (r.amount) byMethod[r.payment_method_id ?? 'none'] = (byMethod[r.payment_method_id ?? 'none'] ?? 0) + r.amount;
+  const total = live.reduce((sum, r) => sum + r.amount, 0);
+  const parts = Object.entries(byMethod).map(([m, v]) => `${methodName(m)} ${money(v)}`).join(' · ');
+  $('history-summary').replaceChildren(el('strong', { textContent: periodLabel() }),
+    live.length ? ` · ${live.length} ${live.length === 1 ? one : many}${total ? ` · ${money(total)}${parts ? ` (${parts})` : ''}` : ''}` : '');
+  if (!days.length) box.append(el('p', { className: 'muted', textContent: `No hay ${many} con esos filtros.` }));
+
+  const shown = historyPeriod === 'all' ? days.slice(0, historyDays) : days;
+  for (const d of shown) {
+    const dayLive = d.sales.filter((r) => !r.voided);
+    const dayTotal = dayLive.reduce((sum, r) => sum + r.amount, 0);
+    box.append(el('div', { className: 'dayhead' }, el('strong', { textContent: dayLabel(d.date) }),
+      el('span', { className: 'muted', textContent: ` · ${dayLive.length} ${dayLive.length === 1 ? one : many}${dayTotal ? ` · ${money(dayTotal)}` : ''}` })));
+    box.append(el('ul', { className: 'list' }, ...d.sales.map((r) => historyCard(view, r))));
   }
-  $('history-more').hidden = days.length <= historyDays;
-  if (days.length <= historyDays && view.coverage?.records_since) box.append(el('p', { className: 'muted', textContent: `Aquí se ven las ventas de los últimos ${RECORD_RETENTION_DAYS} días. Las semanas anteriores se consultan en Ganancias.` }));
+  $('history-more').hidden = !(historyPeriod === 'all' && days.length > historyDays);
+  if (historyPeriod === 'all' && view.coverage?.records_since) box.append(el('p', { className: 'muted', textContent: `Aquí se ve lo de los últimos ${RECORD_RETENTION_DAYS} días. Las semanas anteriores se consultan en Ganancias.` }));
+}
+
+async function correctPurchaseDialog(r) {
+  const l = r.lines[0];
+  const name = productName(currentView, l.product_id);
+  const v = await askChoice({
+    title: `Corregir compra: ${name}`,
+    fields: [
+      { name: 'qty', label: 'Cantidad correcta', type: 'number', min: 1, value: l.qty },
+      { name: 'unit_cost', label: 'Costo por unidad correcto', type: 'number', value: l.unit_cost },
+    ],
+    hint: `Antes: ${l.qty} unidades a ${money(l.unit_cost)} (${methodName(r.payment_method_id)}). Se anula esa compra y se registra la correcta; el stock y el costo promedio se recalculan. ¿Cómo se pagó?`,
+    choices: PAY_CHOICES,
+  });
+  if (!v || !okInt(v.qty) || v.qty < 1 || !okInt(v.unit_cost)) return;
+  await run(() => engine.correctPurchase(r, { qty: v.qty, unit_cost: v.unit_cost, payment_method_id: v.choice }));
+  toast('Compra corregida ✓');
+}
+
+/** Corregir un movimiento de inventario: la cantidad y, si es una entrada (inventario inicial), también su costo por unidad. */
+async function correctAdjustmentDialog(r) {
+  const l = r.lines[0];
+  const entering = l.delta > 0;
+  const isEntry = entering && (l.unit_cost !== undefined || (r.note ?? '').toLowerCase() === 'inventario inicial');
+  const product = currentView.entities.product[l.product_id];
+  const fields = [{ name: 'qty', label: entering ? 'Cantidad correcta que entró' : 'Cantidad correcta que salió', type: 'number', min: 1, value: Math.abs(l.delta) }];
+  if (isEntry) fields.push({ name: 'unit_cost', label: 'Costo por unidad correcto', type: 'number', value: l.unit_cost ?? product?.cost ?? 0,
+    hint: l.unit_cost === undefined ? 'Este movimiento se hizo antes de guardar su costo: se propone el costo actual del producto.' : undefined });
+  const v = await askForm(`Corregir: ${productName(currentView, l.product_id)}`, fields.map((f) => ({ ...f, hint: f.hint ?? (f.name === 'qty' ? `Antes: ${entering ? '+' : '−'}${Math.abs(l.delta)} unidades (${adjustLabel(r)}). Se anula y se registra el correcto; el stock${isEntry ? ' y el costo promedio se recalculan' : ' se recalcula'}.` : undefined) })), 'Corregir');
+  if (!v || !okInt(v.qty) || v.qty < 1 || (isEntry && !okInt(v.unit_cost))) return;
+  await run(() => engine.correctAdjustment(r, entering ? v.qty : -v.qty, isEntry ? v.unit_cost : undefined));
+  toast('Corregido ✓');
+}
+
+/** Desde un producto: ir directo al historial de su mercancía. */
+function showProductHistory(p) {
+  historyKind = 'merch'; historyPeriod = 'all'; historyMethod = 'all'; historySearch = p.name; historyDays = 60;
+  $('history-search').value = p.name; $('history-method').value = 'all'; $('history-day').value = '';
+  document.querySelector('.tabs button[data-tab="history"]').click();
+  render();
+}
+
+/** Lápiz junto al nombre: solo sirve para renombrar. */
+function pencil(p) {
+  const b = btn('✏️', () => renameProduct(p), 'icon');
+  b.setAttribute('aria-label', `Cambiar el nombre de ${p.name}`);
+  b.title = 'Cambiar el nombre';
+  return b;
+}
+
+async function renameProduct(p) {
+  const v = await askForm('Cambiar el nombre', [{ name: 'name', label: 'Nombre del producto', value: p.name, hint: 'El nombre nuevo se ve también en las ventas y movimientos anteriores.' }], 'Guardar');
+  if (v && v.name && v.name !== p.name) await run(() => engine.updateEntity('product', p.id, { name: v.name }));
 }
 
 function renderProducts(view, st) {
@@ -362,12 +536,12 @@ function renderProducts(view, st) {
   for (const p of activeProducts(view)) {
     const stock = view.stock[p.id] ?? 0;
     list.append(el('div', { className: `card ${stock <= 0 ? 'low' : ''}` },
-      el('div', {}, el('div', { className: 'name' }, p.name, p.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''),
+      el('div', {}, el('div', { className: 'name' }, p.name, pencil(p), p.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''),
         el('div', { className: 'meta' }, `Nos cuesta ${money(p.cost ?? 0)} · Vendemos ${money(p.price)} · Quedan `, el('span', { className: 'qty', textContent: String(stock) }))),
       el('div', { className: 'actions' },
         btn('Llegó mercancía', () => restock(p), 'small'),
-        btn('Cambiar', () => editProduct(p), 'secondary small'),
-        btn('Corregir cantidad', () => fixQuantity(p, stock), 'secondary small'),
+        btn('Precio', () => editProductPrice(p), 'secondary small'),
+        btn('Movimientos', () => showProductHistory(p), 'secondary small'),
         btn('Quitar', () => removeProduct(p), 'secondary small'))));
   }
 
@@ -456,37 +630,59 @@ function renderProfit(view) {
 async function run(fn) { await fn(); autoSync(); }
 
 async function voidRecord(r, label) {
-  if (await confirmBox(`¿Anular ${label}? El stock se corrige solo.`, 'Sí, anular')) await run(() => engine.voidOp(r.op_id, 'anulada desde la app'));
+  const what = r.amount ? ` de ${money(r.amount)}` : '';
+  const ok = await confirmTyped({
+    title: `¿Anular ${label}?`,
+    detail: `Se va a anular ${label}${what} (${hourOf(r)}). El stock${r.kind === 'purchase' || r.kind === 'adjustment' ? ' y el costo del producto se corrigen' : ' se corrige'} solo y nada se borra: queda marcada como anulada.`,
+    action: 'Anular',
+  });
+  if (ok) await run(() => engine.voidOp(r.op_id, 'anulada desde la app'));
 }
 
 async function restock(p) {
+  const stock = (await engine.getView()).stock[p.id] ?? 0;
   const v = await askChoice({
-    title: `Llegó mercancía: ${p.name}`, fields: [{ name: 'qty', label: '¿Cuántas unidades llegaron?', type: 'number', min: 1 }],
-    hint: `Se paga a ${money(p.cost ?? 0)} c/u. ¿Cómo se pagó?`, choices: PAY_CHOICES,
+    title: `Llegó mercancía: ${p.name}`,
+    fields: [
+      { name: 'qty', label: '¿Cuántas unidades llegaron?', type: 'number', min: 1 },
+      { name: 'unit_cost', label: 'Costo por unidad de ESTA compra', type: 'number', value: p.cost ?? 0, hint: 'Cámbialo si esta vez te costó diferente.' },
+    ],
+    hint: 'El costo del producto se promedia con lo que ya tenías. ¿Cómo se pagó?', choices: PAY_CHOICES,
   });
-  if (v && v.qty >= 1 && okInt(v.qty)) await run(() => engine.restock(p.id, v.qty, { payment_method_id: v.choice }));
-}
-
-async function fixQuantity(p, current) {
-  const v = await askForm(`Corregir cantidad: ${p.name}`, [{ name: 'qty', label: '¿Cuántas hay realmente?', type: 'number', value: current, hint: `Ahora dice ${current}.` }], 'Corregir');
-  if (v && okInt(v.qty)) await run(() => engine.setQuantity(p.id, v.qty, 'conteo'));
+  if (!v || !okInt(v.qty) || v.qty < 1 || !okInt(v.unit_cost)) return;
+  const next = weightedAverageCost(stock, p.cost ?? 0, v.qty, v.unit_cost);
+  await run(() => engine.restock(p.id, v.qty, { unit_cost: v.unit_cost, payment_method_id: v.choice }));
+  toast(next !== (p.cost ?? 0) ? `Compra guardada ✓ Nuevo costo promedio: ${money(next)}` : 'Compra guardada ✓');
 }
 
 async function removeProduct(p) {
-  if (await confirmBox(`¿Quitar "${p.name}" de la lista? Las ventas pasadas se conservan.`, 'Sí, quitar')) await run(() => engine.updateEntity('product', p.id, { archived: true }));
+  const ok = await confirmTyped({
+    title: `¿Quitar "${p.name}"?`,
+    detail: 'El producto desaparece de las listas. Las ventas y los movimientos anteriores se conservan.',
+    action: 'Quitar',
+  });
+  if (ok) await run(() => engine.updateEntity('product', p.id, { archived: true }));
 }
 
-async function editProduct(p) {
-  const v = await askForm(`Cambiar: ${p.name}`, [
-    { name: 'name', label: 'Nombre', value: p.name },
-    { name: 'cost', label: 'A cómo nos sale (costo)', type: 'number', value: p.cost ?? 0 },
-    { name: 'price', label: 'A cómo lo vendemos (precio)', type: 'number', value: p.price },
-  ]);
-  if (!v || !v.name || !okInt(v.cost) || !okInt(v.price)) return;
+/**
+ * Solo el PRECIO de venta. El costo y la cantidad NO se editan directamente (descuadraría el inventario y el costo promedio):
+ * se corrigen entrada por entrada desde "Movimientos". Única excepción: un producto sin existencias ni entradas todavía
+ * (solo tiene un costo de referencia) deja ajustar ese costo. El nombre se cambia con el lápiz ✏️.
+ */
+async function editProductPrice(p) {
+  const view = await engine.getView();
+  const stock = view.stock[p.id] ?? 0;
+  const hasEntries = Object.values(view.records).some((r) => !r.voided && r.lines.some((l) => l.product_id === p.id)
+    && (r.kind === 'purchase' || (r.kind === 'adjustment' && (r.note ?? '').toLowerCase() === 'inventario inicial')));
+  const costEditable = stock === 0 && !hasEntries;
+  const fields = [{ name: 'price', label: 'A cómo lo vendemos (precio)', type: 'number', value: p.price, hint: 'Cambiarlo no modifica las ventas que ya hiciste.' }];
+  if (costEditable) fields.push({ name: 'cost', label: 'Costo de referencia', type: 'number', value: p.cost ?? 0, hint: 'Todavía no hay mercancía de este producto. Cuando registres su primera entrada, el costo sale de ella.' });
+  else fields.push({ name: 'note', label: 'Costo y cantidad', required: false, value: 'Se corrigen en "Movimientos"', readonly: true });
+  const v = await askForm(`Precio: ${p.name}`, fields, 'Guardar');
+  if (!v || !okInt(v.price) || (costEditable && !okInt(v.cost))) return;
   const changes = {};
-  if (v.name !== p.name) changes.name = v.name;
-  if (v.cost !== (p.cost ?? 0)) changes.cost = v.cost;
   if (v.price !== p.price) changes.price = v.price;
+  if (costEditable && v.cost !== (p.cost ?? 0)) changes.cost = v.cost;
   if (Object.keys(changes).length) await run(() => engine.updateEntity('product', p.id, changes));
 }
 
@@ -502,8 +698,10 @@ async function addProduct() {
     { name: 'qty', label: 'Cantidad que tenemos', type: 'number', value: 0 },
   ], 'Agregar');
   if (!v || !v.name || !okInt(v.cost) || !okInt(v.price) || !okInt(v.qty)) return;
-  const { id } = await engine.createEntity('product', { name: v.name, cost: v.cost, price: v.price });
-  if (v.qty > 0) await engine.adjustStock(id, v.qty, 'inventario inicial');
+  // Con cantidad: el costo viaja en la ENTRADA de inventario (así se puede corregir después desde "Movimientos" sin descuadrar el promedio).
+  // Sin cantidad: queda como costo de referencia del producto hasta que llegue mercancía.
+  const { id } = await engine.createEntity('product', { name: v.name, cost: v.qty > 0 ? 0 : v.cost, price: v.price });
+  if (v.qty > 0) await engine.adjustStock(id, v.qty, 'inventario inicial', v.cost);
   autoSync();
 }
 
@@ -531,21 +729,53 @@ $('sync-btn').addEventListener('click', () => autoSync());
 $('clock-retry').addEventListener('click', () => guardClock());
 $('cart-clear').addEventListener('click', () => { cart.clear(); render(); });
 $('search').addEventListener('input', (ev) => { searchTerm = ev.target.value; render(); });
-$('history-more').addEventListener('click', () => { historyDays += 7; render(); });
+$('history-more').addEventListener('click', () => { historyDays += 14; render(); });
+document.querySelectorAll('#history-kind button').forEach((b) => b.addEventListener('click', () => { historyKind = b.dataset.kind; historyDays = 14; render(); }));
+document.querySelectorAll('#history-period button').forEach((b) => b.addEventListener('click', () => { historyPeriod = b.dataset.period; $('history-day').value = ''; historyDays = 14; render(); }));
+$('history-day').addEventListener('change', (e) => { historyPeriod = e.target.value || 'week'; render(); });
+$('history-search').addEventListener('input', (e) => { historySearch = e.target.value; render(); });
+$('history-method').addEventListener('change', (e) => { historyMethod = e.target.value; render(); });
+/** Confirmar la venta: cada línea con su precio (se puede cambiar solo para esta venta) y la forma de pago. */
+function confirmSale(items, view) {
+  return new Promise((resolve) => {
+    const dlg = el('dialog');
+    const form = el('form');
+    form.append(el('h3', { textContent: 'Confirmar venta' }));
+    const inputs = [];
+    const totalEl = el('p', { className: 'total' });
+    const recalc = () => { totalEl.textContent = `Total: ${money(items.reduce((sum, it, i) => sum + it.qty * (Number(inputs[i].value) || 0), 0))}`; };
+    const rows = el('div', { className: 'sale-lines' });
+    for (const it of items) {
+      const p = view.entities.product[it.product_id];
+      const input = el('input', { type: 'number', inputMode: 'numeric', min: 0, step: 1, required: true, value: String(p.price) });
+      input.setAttribute('aria-label', `Precio de ${p.name}`);
+      input.addEventListener('input', recalc);
+      input.addEventListener('focus', () => input.select());
+      inputs.push(input);
+      rows.append(el('div', { className: 'sale-line' }, el('strong', { textContent: `${it.qty} × ${p.name}` }), el('label', { className: 'price-label' }, el('small', { textContent: 'Precio c/u' }), input)));
+    }
+    form.append(rows, totalEl, el('p', { className: 'muted', textContent: 'Puedes cambiar el precio solo para esta venta (por ejemplo, un descuento). El precio del producto no cambia.' }), el('p', { className: 'muted', textContent: '¿Cómo pagaron?' }));
+    let chosen = null;
+    const pay = PAY_CHOICES.map((c) => btn(c.label, () => { if (!form.reportValidity()) return; chosen = c.id; dlg.close('ok'); }, 'big'));
+    form.append(el('div', { className: 'choices' }, ...pay), btn('Cancelar', () => dlg.close('cancel'), 'secondary'));
+    form.addEventListener('submit', (ev) => ev.preventDefault());
+    dlg.append(form);
+    dlg.addEventListener('close', () => { const prices = inputs.map((i) => Number(i.value)); dlg.remove(); resolve(dlg.returnValue === 'ok' && chosen ? { choice: chosen, prices } : null); });
+    document.body.append(dlg);
+    dlg.showModal();
+    pay[0].focus(); // que no se abra el teclado solo
+  });
+}
+
 $('cart-pay').addEventListener('click', async () => {
   const view = await engine.getView();
   const items = [...cart].filter(([id]) => view.entities.product[id]).map(([product_id, qty]) => ({ product_id, qty }));
   if (!items.length) return;
-  const price = (i) => view.entities.product[i.product_id].price;
-  const total = items.reduce((sum, i) => sum + i.qty * price(i), 0);
-  const v = await askChoice({
-    title: 'Confirmar venta',
-    lines: items.map((i) => `${i.qty} × ${view.entities.product[i.product_id].name} — ${money(i.qty * price(i))}`),
-    total: `Total: ${money(total)}`, hint: '¿Cómo pagaron?', choices: PAY_CHOICES,
-  });
+  const v = await confirmSale(items, view);
   if (!v) return; // cancelado: el carrito queda como estaba
+  const sold = items.map((it, i) => ({ ...it, unit_price: v.prices[i] }));
   cart.clear(); searchTerm = ''; $('search').value = '';
-  await run(() => engine.sellProducts(items, { payment_method_id: v.choice }));
+  await run(() => engine.sellProducts(sold, { payment_method_id: v.choice }));
   toast(`Venta guardada ✓ ${methodName(v.choice)}`);
 });
 

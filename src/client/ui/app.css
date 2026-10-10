@@ -43,3 +43,54 @@ input[type=search] { margin-bottom: .6rem; }
 .choices { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin: 1rem 0 .6rem; } .choices button { min-height: 60px; }
 dialog .list { margin-bottom: .6rem; } dialog .total { font-size: 1.5rem; font-weight: 700; margin: .4rem 0; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--tabs-h) + 5.5rem); background: var(--fg); color: var(--bg); padding: .6rem 1rem; border-radius: 99px; z-index: 20; font-weight: 600; max-width: 90vw; }
+
+/* Tocar varias veces seguidas (+, +, +) no hace zoom en el celular, ni selecciona texto. */
+/* SIN ZOOM de ninguna manera: ni doble toque ni pellizco (pan-x pan-y solo permite desplazarse). Va en TODOS los elementos. */
+* { touch-action: pan-x pan-y; }
+body { -webkit-text-size-adjust: 100%; }
+.stepper button { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+/* Cantidad editable entre − y + */
+.stepper { gap: .4rem; }
+.stepper .qty-input { width: 4.6rem; min-height: 48px; padding: .2rem .3rem; text-align: center; font-size: 1.3rem; font-weight: 700; -moz-appearance: textfield; appearance: textfield; }
+.qty-input::-webkit-outer-spin-button, .qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* Historial: cabecera de la venta y UN producto por línea */
+.list li.sale { display: block; }
+.sale-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.sale-items { margin: .35rem 0 0 .1rem; padding-left: .6rem; border-left: 3px solid var(--line); }
+.sale-items .line { display: flex; justify-content: space-between; gap: .8rem; padding: .15rem 0; font-size: .95rem; }
+.sale-items .line .what { flex: 1; overflow-wrap: anywhere; } .sale-items .line .muted { white-space: nowrap; }
+/* Confirmar venta: precio editable por línea */
+.sale-line { display: flex; justify-content: space-between; align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--line); }
+.sale-line strong { flex: 1; overflow-wrap: anywhere; }
+.sale-line .price-label { margin: 0; width: 8.5rem; font-weight: 400; } .sale-line .price-label input { margin-top: .1rem; }
+
+/* Historial: cada registro es una tarjeta; las ventas con varios productos listan uno por línea */
+.list li.sale { display: block; margin: .55rem 0; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.list li.sale.small { padding: .4rem .75rem; }
+.sale-foot { margin-top: .35rem; padding-top: .3rem; border-top: 1px dashed var(--line); color: var(--muted); font-size: .9rem; }
+.sale-note { margin-top: .25rem; color: var(--muted); font-size: .9rem; }
+.chips { display: flex; gap: .5rem; flex-wrap: wrap; margin: .4rem 0 .6rem; }
+.chips button { background: transparent; color: var(--fg); border-color: var(--line); min-height: 40px; }
+.chips button.active { background: var(--green); color: var(--green-fg); border-color: var(--green); }
+.filters { display: flex; gap: .5rem; margin-bottom: .4rem; } .filters input { flex: 1; margin: 0; min-width: 0; } .filters select { width: auto; max-width: 48%; }
+.dayfilter { display: flex; align-items: center; gap: .6rem; margin: 0 0 .6rem; font-weight: 400; color: var(--muted); font-size: .95rem; } .dayfilter input { width: auto; margin: 0; }
+.summary { margin: .6rem 0; font-weight: 600; }
+
+/* Historial: tipo = control segmentado grande; período = fila aparte de botones pequeños (no se confunden) */
+.segmented { display: grid; grid-template-columns: repeat(3, 1fr); border: 2px solid var(--green); border-radius: 12px; overflow: hidden; margin: .4rem 0 .9rem; }
+.segmented button { border: 0; border-radius: 0; background: transparent; color: var(--fg); min-height: 46px; font-weight: 700; }
+.segmented button.active { background: var(--green); color: var(--green-fg); }
+.filter-label { font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: .1rem 0 .25rem; }
+.chips.period { flex-wrap: nowrap; overflow-x: auto; gap: .35rem; margin: 0 0 .7rem; padding-bottom: .2rem; }
+.chips.period button, .chips.period .datechip { flex: 0 0 auto; min-height: 36px; padding: .15rem .7rem; font-size: .9rem; border-radius: 99px; background: transparent; color: var(--fg); border: 1px solid var(--line); }
+.chips.period button.active, .chips.period .datechip.active { background: color-mix(in srgb, var(--green) 16%, transparent); border-color: var(--green); font-weight: 700; }
+.datechip { position: relative; display: inline-flex; align-items: center; gap: .3rem; margin: 0; cursor: pointer; font-weight: 400; }
+.datechip input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+
+/* Acciones peligrosas (Anular, Quitar): botón rojo, apagado hasta escribir "confirmar" */
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+button.danger:disabled { opacity: .35; }
+input[readonly] { background: transparent; color: var(--muted); border-style: dashed; }
+
+/* Lápiz para renombrar (junto al nombre del producto) */
+button.icon { background: transparent; border: 0; min-height: 40px; min-width: 40px; padding: 0; font-size: 1.05rem; line-height: 1; vertical-align: middle; margin-left: .1rem; }

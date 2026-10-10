@@ -83,6 +83,8 @@ export function validatePayload(op) {
       if (typeof p.product_id !== 'string' || !ID_RE.test(p.product_id)) return 'bad_product';
       if (!isInt(p.delta) || p.delta === 0) return 'bad_delta';
       if (!isStr(p.reason)) return 'bad_reason';
+      // unit_cost (opcional): costo por unidad de una ENTRADA de inventario (p. ej. el inventario inicial). Solo con delta > 0.
+      if (p.unit_cost !== undefined && (!isInt(p.unit_cost) || p.unit_cost < 0 || p.delta < 0)) return 'bad_unit_cost';
       return null;
     }
     case OP.EXPENSE_CREATE: {

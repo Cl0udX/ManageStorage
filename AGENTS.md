@@ -37,7 +37,7 @@ Despliegue típico (Linux con systemd, Node ≥ 22.5; recomendado 24):
 ```bash
 # Dentro de la carpeta del proyecto. USA SIEMPRE el lanzador ./ms: elige un Node que traiga node:sqlite
 # (el `node` de tu shell puede ser más viejo, y por SSH no interactivo puede no haber node en el PATH).
-./ms test                                 # 51 tests (node --test test/*.test.js). Deben pasar SIEMPRE antes de desplegar
+./ms test                                 # 72 tests (node --test test/*.test.js). Deben pasar SIEMPRE antes de desplegar
 systemctl --user restart <SERVICE_NAME>   # aplicar cambios de servidor (el frontend se sirve desde disco: basta recargar)
 ./ms backup                               # backup en caliente (VACUUM INTO)
 # Ver datos (SOLO LECTURA):
@@ -62,7 +62,8 @@ printf '%s' 'clave' | ./ms user --create <usuario> [--org "Nombre"] --role owner
   - *Estado/config* (nombre, precio, costo…): **merge por campo** con `version`/`field_meta`; si dos dispositivos cambian el MISMO campo concurrentemente ⇒ **conflicto explícito** (se guardan ambos valores) que el `owner` resuelve. **Nunca last-write-wins.**
 - **Login offline** (`src/client/auth/session.js`): verificador PBKDF2 local; el primer login en cada dispositivo exige internet.
 - **Formas de pago**: `PAYMENT_METHODS` en `src/shared/constants.js` (`pm-cash` Efectivo, `pm-transfer` Transferencia; ids estables). Cada venta, gasto y "llegó mercancía" guarda `payment_method_id` (opcional en el servidor por compatibilidad; la UI lo exige). "Plata de la semana" por forma de pago = ventas (entra) − gastos − compras de mercancía (salen) → `weeklyReport().byMethod`. No hay saldo inicial ni retiros: solo cuenta lo anotado.
-- **UI**: 4 pestañas — Vender (buscador sin tildes + carrito + confirmación con Efectivo/Transferencia), Historial (ventas por día, `salesByDay`), Productos, Ganancias.
+- **Costo promedio y precio por venta**: cada compra (`PURCHASE_CREATE`) lleva su propio `unit_cost`; al registrarla el servidor (`applyPurchaseCosts`) recalcula el costo del producto como **promedio ponderado** (`weightedAverageCost` en `src/domain/state.js`; sin existencias, o con existencias negativas, el costo es el de la compra) y lo publica como un cambio de entidad con versión nueva; el cliente calcula lo mismo de forma optimista para verlo sin conexión. Cada línea de venta guarda `unit_price` y `unit_cost` DEL MOMENTO (y la venta su `amount`), por eso cambiar el precio o el costo del producto **no altera las ventas pasadas** (hay prueba). El precio de una venta se puede cambiar en la confirmación (descuento) sin tocar el precio del producto. Cada línea de compra guarda `stock_before`, `cost_before` y `cost_after`; **anular una compra** devuelve el costo del producto a lo que sería sin ella (`revertedCost`: si hubo compras posteriores se vuelven a promediar sin las unidades de la anulada; si el costo se cambió a mano después, no se pisa; compras sin esos datos no tocan el costo). **Corregir una compra** = anular + registrar la correcta con la fecha original (`engine.correctPurchase`); el nuevo promedio usa las existencias actuales (aproximación documentada). Dinero que sale por una compra = lo realmente pagado (`amount`), no cantidad × costo guardado.
+- **UI**: 4 pestañas — Vender (buscador sin tildes + carrito con cantidad editable (se escribe o +/−) + confirmación con precio por línea y Efectivo/Transferencia), Historial (pestañas **Ventas / Mercancía / Gastos**; «Mercancía» = compras + inventario inicial + ajustes/conteos, con Corregir/Anular; período en una fila aparte (hoy/ayer/semana/mes/todo + chip 📅 para un día) con `periodRange`, búsqueda por producto y forma de pago, resumen del período; cada registro es una tarjeta con un producto por línea). Productos: Llegó mercancía · Precio · Movimientos (salta al historial de ese producto) · Quitar, y un lápiz ✏️ junto al nombre solo para renombrar. **El costo y la cantidad NO se editan directo** (descuadraría el inventario y el costo promedio): se corrigen entrada por entrada en Historial → Mercancía (Corregir), incluido el inventario inicial, que ahora guarda su propio costo (`STOCK_ADJUST` con `unit_cost`, entra al promedio igual que una compra). **Anular y Quitar piden escribir «confirmar»** (`confirmTyped`, `src/client/ui/confirm.js`); toda anulación pasa por `voidRecord` (hay prueba), Productos, Ganancias.
 - **Ganancia semanal** (`src/domain/report.js`): `ventas − costo de lo vendido − gastos` (semana lunes–domingo, hora local). Cada línea de venta guarda `unit_cost` del momento. Las compras de mercancía no restan (son inventario). Las anuladas no cuentan.
 
 ### Mapa de carpetas
@@ -171,3 +172,7 @@ Hay equipos con versiones viejas de la app y **operaciones pendientes guardadas 
 | `db-inspector` | Consultar datos en solo lectura y explicarlos |
 
 Comandos: `/test`, `/status`, `/db <consulta o atajo>`, `/backup`.
+
+
+### Sin zoom (decisión del dueño)
+La app no debe hacer zoom de ninguna manera: `viewport` con `maximum-scale=1, user-scalable=no`, `* { touch-action: pan-x pan-y }` en el CSS (`manipulation` NO sirve: permite el pellizco) y cancelación de `gesturestart/gesturechange/gestureend` en `app.js`. Hay una prueba que lo vigila. Las entradas de texto/número deben tener ≥16 px de letra (si no, iOS hace zoom al enfocarlas).

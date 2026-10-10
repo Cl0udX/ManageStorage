@@ -881,3 +881,402 @@ test('visor de datos: tablas con ancho natural y desplazamiento (no se aprietan)
     assert.match(q, /<div class="card">/, 'también en los resultados de una consulta');
   } finally { v.p.kill(); await w.close(); }
 });
+
+// ---------- Costo promedio, precio por venta, ventas pasadas intactas ----------
+import { weightedAverageCost, purchaseCostUpdates } from '../src/domain/state.js';
+
+test('costo promedio ponderado: fórmula (con existencias, sin existencias, negativas, varias líneas)', () => {
+  assert.equal(weightedAverageCost(100, 3000, 100, 5000), 4000);
+  assert.equal(weightedAverageCost(10, 2217, 10, 2400), 2309, 'redondea al entero más cercano');
+  assert.equal(weightedAverageCost(0, 3000, 20, 5000), 5000, 'sin existencias: el costo de la compra');
+  assert.equal(weightedAverageCost(-4, 3000, 6, 5000), 5000, 'existencias negativas no cuentan');
+  const upd = purchaseCostUpdates([{ product_id: 'a', qty: 10, unit_cost: 200 }, { product_id: 'a', qty: 10, unit_cost: 400 }, { product_id: 'b', qty: 5, unit_cost: 100 }],
+    (id) => ({ a: 10, b: 5 })[id], (id) => ({ a: 100, b: 100 })[id]);
+  assert.deepEqual(upd, { a: 233 }, 'a: (10·100+10·200)/20=150, luego (20·150+10·400)/30=233; b no cambia');
+});
+
+test('comprar a otro precio: el costo pasa a ser el promedio (servidor y vista local coinciden, incluso sin conexión) y el dinero que sale es el real', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    const B = await w.device('B', 'staffa');
+    await A.engine.sync(); await B.engine.sync();
+    A.net.online = false;
+    await A.engine.restock('p1', 100, { unit_cost: 5000, payment_method_id: 'pm-cash' });          // había 100 a 3000
+    assert.equal((await A.engine.getView()).entities.product.p1.cost, 4000, 'se ve al instante sin conexión');
+    A.net.online = true;
+    await A.engine.sync(); await B.engine.sync();
+    assert.equal(w.entity().cost, 4000);
+    assert.equal((await B.engine.getView()).entities.product.p1.cost, 4000, 'el otro equipo recibe el nuevo costo');
+    assert.equal(w.entity().version, 2);
+
+    const wk = weeklyReport(Object.values((await A.engine.getView()).records), weekStart(new Date()));
+    assert.equal(wk.byMethod['pm-cash'].out, 500000, 'sale lo que de verdad se pagó (100 × 5000), no 100 × costo guardado');
+
+    // la siguiente venta toma el costo promedio
+    await A.engine.sellProducts([{ product_id: 'p1', qty: 10 }]);
+    await A.engine.sync();
+    const sale = Object.values((await A.engine.getView()).records).find((r) => r.kind === 'sale');
+    assert.equal(sale.lines[0].unit_cost, 4000);
+    assert.equal(A.engine.healCount + B.engine.healCount, 0, 'la huella coincide: nada se autocorrige');
+  } finally { await w.close(); }
+});
+
+test('dos equipos compran el mismo producto a distinto precio sin conexión: convergen al mismo promedio', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    const B = await w.device('B', 'staffa');
+    await A.engine.sync(); await B.engine.sync();
+    A.net.online = false; B.net.online = false;
+    await A.engine.restock('p1', 50, { unit_cost: 4000 });
+    await B.engine.restock('p1', 50, { unit_cost: 6000 });
+    A.net.online = true; B.net.online = true;
+    for (let i = 0; i < 2; i++) { await A.engine.sync(); await B.engine.sync(); }
+    // el servidor decide el orden: A primero → (100·3000+50·4000)/150=3333; luego B → (150·3333+50·6000)/200=4000
+    assert.equal(w.entity().cost, 4000);
+    assert.equal(w.stock(), 200);
+    assert.equal((await A.engine.getView()).entities.product.p1.cost, 4000);
+    assert.equal((await B.engine.getView()).entities.product.p1.cost, 4000);
+  } finally { await w.close(); }
+});
+
+test('venta a otro precio (descuento) y cambio de precio del producto: las ventas pasadas NO cambian', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    await A.engine.sellProducts([{ product_id: 'p1', qty: 4 }]);                          // 4 × 5000 (precio normal)
+    await A.engine.sellProducts([{ product_id: 'p1', qty: 2, unit_price: 4500 }]);        // 2 × 4500 (otro precio, solo esta venta)
+    await A.engine.sync();
+    assert.equal(w.entity().price, 5000, 'vender a otro precio no cambia el precio del producto');
+
+    await A.engine.updateEntity('product', 'p1', { price: 6000, cost: 3500 });             // sube precio y costo
+    await A.engine.sellProducts([{ product_id: 'p1', qty: 1 }]);                          // 1 × 6000
+    await A.engine.sync();
+    const sales = Object.values((await A.engine.getView()).records).filter((r) => r.kind === 'sale').sort((a, b) => a.created_at.localeCompare(b.created_at));
+    assert.deepEqual(sales.map((r) => [r.lines[0].unit_price, r.lines[0].unit_cost, r.amount]), [[5000, 3000, 20000], [4500, 3000, 9000], [6000, 3500, 6000]],
+      'cada venta conserva su propio precio y su propio costo');
+    const wk = weeklyReport(Object.values((await A.engine.getView()).records), weekStart(new Date()));
+    // costo de lo vendido: 4×3000 + 2×3000 + 1×3500 = 21500 (cada venta con SU costo del momento)
+    assert.deepEqual([wk.sales, wk.cogs, wk.gross], [35000, 21500, 13500]);
+    // y el servidor tiene lo mismo
+    assert.equal(w.db.prepare("SELECT SUM(json_extract(data,'$.amount')) s FROM records WHERE kind='sale'").get().s, 35000);
+  } finally { await w.close(); }
+});
+
+// ---------- Corregir / anular compras y filtros del historial ----------
+import { revertedCost } from '../src/domain/state.js';
+import { recordsByDay, periodRange, inRange } from '../src/domain/report.js';
+
+const purchases = async (d) => Object.values((await d.engine.getView()).records).filter((r) => r.kind === 'purchase');
+
+test('cada compra guarda cuántas unidades había y a qué costo antes, y cómo quedó (permite revertir)', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    await A.engine.restock('p1', 100, { unit_cost: 5000, payment_method_id: 'pm-cash' });
+    await A.engine.sync();
+    const [rec] = await purchases(A);
+    assert.deepEqual([rec.lines[0].stock_before, rec.lines[0].cost_before, rec.lines[0].cost_after], [100, 3000, 4000]);
+    assert.equal(w.entity().cost, 4000);
+  } finally { await w.close(); }
+});
+
+test('anular la última compra devuelve el costo y el stock a como estaban; la plata que "salió" deja de contar', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const p = await A.engine.restock('p1', 100, { unit_cost: 5000, payment_method_id: 'pm-cash' });
+    await A.engine.sync();
+    assert.equal(w.entity().cost, 4000);
+    await A.engine.voidOp(p.op_id, 'error'); await A.engine.sync();
+    assert.equal(w.entity().cost, 3000, 'el costo vuelve');
+    assert.equal(w.stock(), 100);
+    const v = await A.engine.getView();
+    assert.equal(v.entities.product.p1.cost, 3000);
+    const wk = weeklyReport(Object.values(v.records), weekStart(new Date()));
+    assert.equal(wk.purchases, 0); assert.deepEqual(wk.byMethod['pm-cash'] ?? { in: 0, out: 0 }, { in: 0, out: 0 });
+    assert.equal(A.engine.healCount, 0);
+  } finally { await w.close(); }
+});
+
+test('anular una compra ANTERIOR cuando hubo otra después: el costo queda como si la anulada nunca hubiera existido', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const p1 = await A.engine.restock('p1', 100, { unit_cost: 5000 });   // stock 200, costo 4000
+    await A.engine.restock('p1', 100, { unit_cost: 6000 });              // stock 300, costo 4667
+    await A.engine.sync();
+    assert.equal(w.entity().cost, 4667);
+    await A.engine.voidOp(p1.op_id, 'error'); await A.engine.sync();
+    assert.equal(w.stock(), 200);
+    assert.equal(w.entity().cost, 4500, '100 a 3000 + 100 a 6000 = 4500');
+    assert.equal((await A.engine.getView()).entities.product.p1.cost, 4500);
+  } finally { await w.close(); }
+});
+
+test('si el costo se cambió a mano después de la compra, anularla NO lo pisa; y una compra sin datos guardados no toca nada', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const p = await A.engine.restock('p1', 100, { unit_cost: 5000 });
+    await A.engine.sync();
+    await A.engine.updateEntity('product', 'p1', { cost: 3700 }); await A.engine.sync();
+    await A.engine.voidOp(p.op_id, 'error'); await A.engine.sync();
+    assert.equal(w.entity().cost, 3700, 'lo manual manda');
+    assert.equal(w.stock(), 100, 'el stock sí se corrige');
+    // función pura: compra anterior a que se guardaran los datos ⇒ null
+    assert.equal(revertedCost({ qty: 5, unit_cost: 10 }, [], 100), null);
+    assert.equal(revertedCost({ qty: 5, unit_cost: 10, cost_before: 90, cost_after: 100 }, [], 100), 90);
+    assert.equal(revertedCost({ qty: 5, unit_cost: 10, cost_before: 90, cost_after: 100 }, [], 95), null, 'costo distinto al esperado ⇒ no se toca');
+  } finally { await w.close(); }
+});
+
+test('corregir una compra (cantidad y costo equivocados), incluso sin conexión: stock, costo, plata y fecha quedan bien', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    const B = await w.device('B', 'staffa');
+    await A.engine.sync(); await B.engine.sync();
+    const longAgo = new Date(Date.now() - 3 * 86_400_000);
+    A.engine.now = () => longAgo;
+    await A.engine.restock('p1', 100, { unit_cost: 50000, payment_method_id: 'pm-cash' });   // error de dedo: eran 10 a 5000
+    A.engine.now = () => new Date();
+    await A.engine.sync();
+    assert.equal(w.entity().cost, 26500);
+    const wrong = (await purchases(A))[0];
+
+    A.net.online = false;
+    await A.engine.correctPurchase(wrong, { qty: 10, unit_cost: 5000, payment_method_id: 'pm-cash' });
+    assert.equal((await A.engine.getView()).stock.p1, 110, 'se ve al instante sin conexión');
+    A.net.online = true;
+    await A.engine.sync(); await B.engine.sync();
+
+    assert.equal(w.stock(), 110);
+    assert.equal(w.entity().cost, 3182, '(100×3000 + 10×5000) / 110');
+    const v = await B.engine.getView();
+    assert.equal(v.entities.product.p1.cost, 3182, 'el otro equipo también');
+    const ps = Object.values(v.records).filter((r) => r.kind === 'purchase').sort((a, b) => a.created_at.localeCompare(b.created_at));
+    assert.equal(ps.length, 2);
+    assert.equal(ps[0].voided, true);
+    assert.equal(ps[1].amount, 50000);
+    assert.equal(ps[1].created_at, wrong.created_at, 'la compra corregida conserva la fecha original');
+    const wk = weeklyReport(Object.values(v.records), weekStart(longAgo));
+    assert.equal(wk.purchases, 50000, 'solo cuenta la compra correcta, no la equivocada');
+    assert.equal(A.engine.healCount + B.engine.healCount, 0);
+    assert.equal(w.opCount('PURCHASE_CREATE'), 2); assert.equal(w.opCount('OP_VOID'), 1, 'nada se borra: queda todo el rastro');
+  } finally { await w.close(); }
+});
+
+test('historial: por tipo (venta/compra/gasto) y períodos hoy, ayer, semana, mes, un día y todo', () => {
+  const rec = (kind, iso, amount) => ({ kind, created_at: new Date(iso).toISOString(), amount, voided: false, lines: [], payment_method_id: 'pm-cash' });
+  const rs = [rec('sale', '2026-10-07T10:00:00', 10), rec('purchase', '2026-10-07T11:00:00', 20), rec('expense', '2026-10-06T09:00:00', 5), rec('sale', '2026-09-30T23:59:00', 7), rec('sale', '2026-10-12T00:00:00', 9)];
+  assert.deepEqual(recordsByDay(rs, 'purchase').map((d) => d.total), [20]);
+  assert.deepEqual(recordsByDay(rs, 'expense').map((d) => d.total), [5]);
+  assert.equal(recordsByDay(rs, 'sale').length, 3);
+  const now = new Date('2026-10-07T15:00:00');
+  const inP = (period) => rs.filter((r) => inRange(r.created_at, periodRange(period, now))).map((r) => r.amount).sort((a, b) => a - b);
+  assert.deepEqual(inP('today'), [10, 20]);
+  assert.deepEqual(inP('yesterday'), [5]);
+  assert.deepEqual(inP('week'), [5, 10, 20], 'lunes 5 a domingo 11: no entra el 30/sep ni el 12/oct');
+  assert.deepEqual(inP('month'), [5, 9, 10, 20], 'octubre completo');
+  assert.deepEqual(inP('2026-09-30'), [7], 'un día específico');
+  assert.deepEqual(inP('all'), [5, 7, 9, 10, 20]);
+});
+
+// ---------- Mercancía (compras + inventario inicial), sin zoom ----------
+test('corregir el "inventario inicial" mal escrito: se anula y se registra el correcto con la fecha original; el stock queda bien', async () => {
+  const w = await world({ withProduct: false });
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const longAgo = new Date(Date.now() - 2 * 86_400_000);
+    A.engine.now = () => longAgo;
+    const { id } = await A.engine.createEntity('product', { name: 'Águila 330cc', cost: 2217, price: 3500 });
+    await A.engine.adjustStock(id, 120, 'inventario inicial');                                  // eran 12
+    A.engine.now = () => new Date();
+    await A.engine.sync();
+    assert.equal(w.stock(id), 120);
+    const wrong = Object.values((await A.engine.getView()).records).find((r) => r.kind === 'adjustment');
+
+    await A.engine.correctAdjustment(wrong, 12);
+    await A.engine.sync();
+    assert.equal(w.stock(id), 12);
+    assert.equal(w.entity(id).cost, 2217, 'el costo no se toca');
+    const adj = Object.values((await A.engine.getView()).records).filter((r) => r.kind === 'adjustment').sort((a, b) => a.created_at.localeCompare(b.created_at));
+    assert.deepEqual(adj.map((r) => [r.voided, r.lines[0].delta]), [[true, 120], [false, 12]]);
+    assert.equal(adj[1].created_at, wrong.created_at, 'conserva la fecha original');
+    assert.equal(adj[1].note, 'inventario inicial');
+    // y aparece en la pestaña "Mercancía" (compras + ajustes), no en ventas
+    const merch = recordsByDay(Object.values((await A.engine.getView()).records), ['purchase', 'adjustment']);
+    assert.equal(merch.flatMap((d) => d.sales).length, 2);
+    assert.equal(recordsByDay(Object.values((await A.engine.getView()).records), 'sale').length, 0);
+  } finally { await w.close(); }
+});
+
+test('sin zoom de ninguna manera: viewport, CSS en todos los elementos y gestos de pellizco cancelados', async () => {
+  const w = await world();
+  try {
+    const html = await (await fetch(`${w.baseUrl}/`)).text();
+    assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
+    const css = await (await fetch(`${w.baseUrl}/src/client/ui/app.css`)).text();
+    assert.match(css, /\*\s*\{\s*touch-action:\s*pan-x pan-y;\s*\}/, 'touch-action en todos los elementos');
+    assert.ok(!/touch-action:\s*manipulation/.test(css), 'manipulation sí permite el pellizco');
+    const js = await (await fetch(`${w.baseUrl}/src/client/ui/app.js`)).text();
+    for (const g of ['gesturestart', 'gesturechange', 'gestureend']) assert.ok(js.includes(g), `falta cancelar ${g}`);
+  } finally { await w.close(); }
+});
+
+// ---------- Entradas de inventario con costo; confirmación escrita; sin "Editar" ----------
+import { isConfirmation, CONFIRM_WORD } from '../src/client/ui/confirm.js';
+import { readFileSync as readSrc } from 'node:fs';
+
+const adjustments = async (d) => Object.values((await d.engine.getView()).records).filter((r) => r.kind === 'adjustment').sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+test('crear un producto con inventario inicial: el costo viaja con la entrada (queda en el producto, se ve sin conexión y no se autocorrige nada)', async () => {
+  const w = await world({ withProduct: false });
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    A.net.online = false;
+    const { id } = await A.engine.createEntity('product', { name: 'Águila 330cc', cost: 0, price: 3500 });
+    await A.engine.adjustStock(id, 10, 'inventario inicial', 1000);
+    assert.equal((await A.engine.getView()).entities.product[id].cost, 1000, 'sin conexión ya se ve el costo');
+    A.net.online = true;
+    await A.engine.sync();
+    assert.equal(w.entity(id).cost, 1000);
+    assert.equal(w.stock(id), 10);
+    const [adj] = await adjustments(A);
+    assert.deepEqual([adj.lines[0].unit_cost, adj.lines[0].stock_before, adj.lines[0].cost_before, adj.lines[0].cost_after], [1000, 0, 0, 1000]);
+    assert.equal(A.engine.healCount, 0);
+  } finally { await w.close(); }
+});
+
+test('validación: unit_cost solo en entradas, entero y no negativo', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    const push = (seq, payload) => A.api.push([rawOp(A.deviceId, seq, { op_type: 'STOCK_ADJUST', entity_type: 'adjustment', entity_id: `adj-${seq}`, payload })]).then((r) => r.results[0]);
+    assert.equal((await push(1, { product_id: 'p1', delta: 5, reason: 'x', unit_cost: 100 })).status, 'applied');
+    assert.equal((await push(2, { product_id: 'p1', delta: -5, reason: 'x', unit_cost: 100 })).reason, 'bad_unit_cost', 'una salida no lleva costo');
+    assert.equal((await push(3, { product_id: 'p1', delta: 5, reason: 'x', unit_cost: -1 })).reason, 'bad_unit_cost');
+    assert.equal((await push(4, { product_id: 'p1', delta: 5, reason: 'x', unit_cost: 1.5 })).reason, 'bad_unit_cost');
+    assert.equal((await push(5, { product_id: 'p1', delta: 5, reason: 'conteo' })).status, 'applied', 'sin costo sigue valiendo (ajustes y conteos)');
+  } finally { await w.close(); }
+});
+
+test('corregir el COSTO y la cantidad del inventario inicial: stock y costo promedio quedan exactos (con ventas ya hechas)', async () => {
+  const w = await world({ withProduct: false });
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const { id } = await A.engine.createEntity('product', { name: 'X', cost: 0, price: 5000 });
+    await A.engine.adjustStock(id, 10, 'inventario inicial', 1000);        // escrito mal: eran 12 a 1200
+    await A.engine.sellProducts([{ product_id: id, qty: 3 }]);
+    await A.engine.sync();
+    assert.equal(w.stock(id), 7);
+    const [wrong] = await adjustments(A);
+    A.net.online = false;
+    await A.engine.correctAdjustment(wrong, 12, 1200);
+    assert.equal((await A.engine.getView()).stock[id], 9, 'sin conexión: 12 − 3 vendidas');
+    A.net.online = true;
+    await A.engine.sync();
+    assert.equal(w.stock(id), 9);
+    assert.equal(w.entity(id).cost, 1200, 'el costo es el de la entrada correcta');
+    assert.equal((await A.engine.getView()).entities.product[id].cost, 1200);
+    assert.equal(A.engine.healCount, 0);
+    const adj = await adjustments(A);
+    assert.deepEqual(adj.map((r) => [r.voided, r.lines[0].delta, r.lines[0].unit_cost]), [[true, 10, 1000], [false, 12, 1200]]);
+    assert.equal(adj[1].created_at, wrong.created_at, 'conserva la fecha');
+  } finally { await w.close(); }
+});
+
+test('inventario inicial + una compra: corregir el costo inicial recalcula el promedio como si desde el principio fuera el correcto', async () => {
+  const w = await world({ withProduct: false });
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const { id } = await A.engine.createEntity('product', { name: 'X', cost: 0, price: 5000 });
+    await A.engine.adjustStock(id, 10, 'inventario inicial', 1000);
+    await A.engine.restock(id, 10, { unit_cost: 2000 });                    // promedio 1500, stock 20
+    await A.engine.sync();
+    assert.equal(w.entity(id).cost, 1500);
+    const [initial] = await adjustments(A);
+    await A.engine.correctAdjustment(initial, 10, 1400);                    // el costo inicial era 1400
+    await A.engine.sync();
+    assert.equal(w.stock(id), 20);
+    assert.equal(w.entity(id).cost, 1700, '(10×2000 + 10×1400) / 20');
+  } finally { await w.close(); }
+});
+
+test('anular el inventario inicial devuelve costo y stock a cero; y un inventario inicial VIEJO (sin costo guardado) también se puede corregir con costo', async () => {
+  const w = await world({ withProduct: false });
+  try {
+    const A = await w.device('A', 'owner');
+    await A.engine.sync();
+    const { id } = await A.engine.createEntity('product', { name: 'X', cost: 0, price: 5000 });
+    const op = await A.engine.adjustStock(id, 10, 'inventario inicial', 1000);
+    await A.engine.sync();
+    await A.engine.voidOp(op.op_id, 'error'); await A.engine.sync();
+    assert.deepEqual([w.stock(id), w.entity(id).cost], [0, 0]);
+
+    // producto "de antes": inventario inicial sin costo guardado (como los que ya existen) y costo cargado en el producto
+    const W = await world();                                                // p1: costo 3000, stock 100 por un ajuste sin costo
+    try {
+      const B = await W.device('B', 'owner');
+      await B.engine.sync();
+      const legacy = (await adjustments(B)).find((r) => r.note === 'inventario inicial');
+      assert.equal(legacy.lines[0].unit_cost, undefined);
+      await B.engine.correctAdjustment(legacy, 100, 3400);
+      await B.engine.sync();
+      assert.equal(W.stock(), 100);
+      assert.equal(W.entity().cost, 3400, 'el costo corregido reemplaza al viejo (no queda mezclado)');
+    } finally { await W.close(); }
+  } finally { await w.close(); }
+});
+
+test('confirmación escrita: solo vale "confirmar" (sin importar mayúsculas, tildes o espacios)', () => {
+  assert.equal(CONFIRM_WORD, 'confirmar');
+  for (const ok of ['confirmar', 'Confirmar', 'CONFIRMAR', '  confirmar ', 'confírmar']) assert.equal(isConfirmation(ok), true, ok);
+  for (const bad of ['', 'confirm', 'confirmo', 'si', 'confirmar!', 'confirmar ya', null, undefined]) assert.equal(isConfirmation(bad), false, String(bad));
+});
+
+test('la pantalla pide escribir "confirmar" para Anular y Quitar (todas las rutas) y ya no tiene "Editar" de costo/cantidad', () => {
+  const src = readSrc(new URL('../src/client/ui/app.js', import.meta.url), 'utf8');
+  const fn = (name) => src.slice(src.indexOf(`async function ${name}(`), src.indexOf('\n}\n', src.indexOf(`async function ${name}(`)));
+  for (const name of ['voidRecord', 'removeProduct']) {
+    assert.ok(fn(name).includes('confirmTyped('), `${name} debe pedir confirmación escrita`);
+    assert.ok(!fn(name).includes('confirmBox('), `${name} no debe usar la confirmación simple`);
+  }
+  // toda anulación pasa por voidRecord: nadie llama a engine.voidOp directamente salvo voidRecord y las correcciones
+  const direct = [...src.matchAll(/engine\.voidOp\(/g)].length;
+  assert.equal(direct, 1, 'solo voidRecord anula directamente');
+  assert.ok(!src.includes("btn('Editar'"), 'el botón Editar ya no existe');
+  assert.ok(src.includes("btn('Precio'") && src.includes('editProductPrice'), 'botón Precio (solo precio)');
+  assert.ok(src.includes('renameProduct') && src.includes("btn('✏️'"), 'lápiz para renombrar');
+  assert.ok(!/label: 'Cantidad que hay'/.test(src), 'la cantidad no se edita directo');
+  assert.ok(!/engine\.setQuantity\(/.test(src), 'la pantalla ya no fija cantidades directamente');
+});
+
+test('renombrar un producto (lápiz): el nombre nuevo llega a todos los equipos y las ventas y movimientos viejos lo muestran; precio, costo y stock no cambian', async () => {
+  const w = await world();
+  try {
+    const A = await w.device('A', 'owner');
+    const B = await w.device('B', 'staffa');
+    await A.engine.sync(); await B.engine.sync();
+    await A.engine.sellProducts([{ product_id: 'p1', qty: 2 }]); await A.engine.sync();
+    await A.engine.updateEntity('product', 'p1', { name: 'Cerveza Águila 330cc' });
+    await A.engine.sync(); await B.engine.sync();
+    const v = await B.engine.getView();
+    assert.equal(v.entities.product.p1.name, 'Cerveza Águila 330cc');
+    assert.deepEqual([w.entity().price, w.entity().cost, w.stock()], [5000, 3000, 98], 'solo cambia el nombre');
+    const sale = Object.values(v.records).find((r) => r.kind === 'sale');
+    assert.equal(sale.lines[0].product_id, 'p1', 'las ventas guardan el id: el nombre se resuelve al mostrarlas');
+    assert.equal(w.db.prepare("SELECT COUNT(*) c FROM conflicts").get().c, 0);
+  } finally { await w.close(); }
+});

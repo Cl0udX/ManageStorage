@@ -1,7 +1,7 @@
 // Reglas de aplicación de una operación sobre el estado del servidor.
 // Se ejecuta DENTRO de una transacción abierta por el llamador. Devuelve {status, reason, effects}.
 import { OP, RECORD_KIND, ENTITY_FIELDS } from '../../shared/constants.js';
-import { buildRecord, movementsOf, reverseMovements, entityDefaults } from '../../domain/state.js';
+import { buildRecord, movementsOf, reverseMovements, entityDefaults, purchaseCostPlan, revertedCost, costedEntries } from '../../domain/state.js';
 import { checkFieldValue } from '../../shared/validate.js';
 import { nowIso } from '../db/db.js';
 
@@ -99,10 +99,32 @@ function applyRecord(db, ctx, op) {
     if (!getEntity(db, ctx.org_id, 'product', l.product_id)) return rejected(`unknown_product:${l.product_id}`);
   }
   const movements = movementsOf(record);
+  // El costo promedio se calcula con el stock de ANTES de esta compra, así que va antes de insertar los movimientos.
+  const costEffects = costedEntries(record).length ? applyPurchaseCosts(db, ctx, op, record) : [];
   db.prepare('INSERT INTO records (org_id,id,kind,op_id,data,voided,created_at) VALUES (?,?,?,?,?,0,?)')
     .run(ctx.org_id, record.id, record.kind, op.op_id, JSON.stringify(record), op.created_at);
   insertMovements(db, ctx, op, record.id, movements, record.kind);
-  return { status: 'applied', reason: null, effects: [{ t: 'record', record, movements }] };
+  return { status: 'applied', reason: null, effects: [{ t: 'record', record, movements }, ...costEffects] };
+}
+
+/** Compra a un costo distinto: el costo del producto pasa a ser el promedio ponderado (con versión nueva, como cualquier cambio). */
+function applyPurchaseCosts(db, ctx, op, record) {
+  const stockOf = db.prepare('SELECT COALESCE(SUM(delta),0) AS s FROM inventory_movements WHERE org_id=? AND product_id=?');
+  const cache = {};
+  const ent = (id) => (cache[id] ??= getEntity(db, ctx.org_id, 'product', id));
+  const entries = costedEntries(record); // compras y entradas de inventario con costo
+  const { details, final } = purchaseCostPlan(entries, (id) => stockOf.get(ctx.org_id, id).s, (id) => ent(id).data.cost ?? 0);
+  // Se guarda en cada línea cuánto había y a qué costo antes, y cómo quedó: permite revertir el costo si la entrada se anula o corrige.
+  entries.forEach((e, k) => Object.assign(record.lines[e.i], details[k]));
+  const effects = [];
+  for (const [id, cost] of Object.entries(final)) {
+    const e = ent(id);
+    if ((e.data.cost ?? 0) === cost) continue;
+    const version = e.version + 1;
+    const saved = saveEntity(db, ctx.org_id, 'product', id, { ...e.data, cost }, version, { ...e.field_meta, cost: { v: version, d: op.device_id } });
+    effects.push(entityEffect('product', saved));
+  }
+  return effects;
 }
 
 /** Anular = movimientos compensatorios + marca. Nunca se borra nada. Idempotente. */
@@ -115,7 +137,31 @@ function applyVoid(db, ctx, op) {
   record.voided = true;
   db.prepare('UPDATE records SET voided=1, data=? WHERE org_id=? AND id=?').run(JSON.stringify(record), ctx.org_id, row.id);
   insertMovements(db, ctx, op, row.id, movements, 'void');
-  return { status: 'applied', reason: null, effects: [{ t: 'void', record_id: row.id, movements, by_op_id: op.op_id }] };
+  const costEffects = costedEntries(record).length ? revertPurchaseCosts(db, ctx, op, record) : [];
+  return { status: 'applied', reason: null, effects: [{ t: 'void', record_id: row.id, movements, by_op_id: op.op_id }, ...costEffects] };
+}
+
+/** Anular una compra devuelve el costo del producto a lo que sería sin ella (ver revertedCost). */
+function revertPurchaseCosts(db, ctx, op, record) {
+  const seq = db.prepare('SELECT seq FROM operations WHERE op_id=?').get(record.op_id)?.seq;
+  if (seq == null) return [];
+  const laterRecords = db.prepare(`SELECT r.data FROM records r JOIN operations o ON o.op_id = r.op_id
+    WHERE r.org_id=? AND r.kind IN ('purchase','adjustment') AND r.voided=0 AND o.seq > ? ORDER BY o.seq`).all(ctx.org_id, seq).map((r) => JSON.parse(r.data));
+  const effects = [];
+  const seen = new Set();
+  for (const line of costedEntries(record)) {
+    if (seen.has(line.product_id)) continue;
+    seen.add(line.product_id);
+    const ent = getEntity(db, ctx.org_id, 'product', line.product_id);
+    if (!ent) continue;
+    const later = laterRecords.flatMap((r) => costedEntries(r).filter((l) => l.product_id === line.product_id));
+    const cost = revertedCost(line, later, ent.data.cost ?? 0);
+    if (cost == null) continue;
+    const version = ent.version + 1;
+    const saved = saveEntity(db, ctx.org_id, 'product', line.product_id, { ...ent.data, cost }, version, { ...ent.field_meta, cost: { v: version, d: op.device_id } });
+    effects.push(entityEffect('product', saved));
+  }
+  return effects;
 }
 
 /** Resolución explícita de un conflicto de estado (solo online, solo owner). */

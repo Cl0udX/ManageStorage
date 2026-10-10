@@ -31,7 +31,7 @@ export function buildRecord(op) {
       return { ...base, lines, amount: lines.reduce((s, l) => s + l.qty * l.unit_cost, 0) };
     }
     case OP.STOCK_ADJUST:
-      return { ...base, note: p.reason, lines: [{ product_id: p.product_id, delta: p.delta }], amount: 0 };
+      return { ...base, note: p.reason, lines: [{ product_id: p.product_id, delta: p.delta, ...(p.unit_cost !== undefined ? { unit_cost: p.unit_cost } : {}) }], amount: 0 };
     case OP.EXPENSE_CREATE:
       return { ...base, note: p.description, lines: [], amount: p.amount };
     default:
@@ -41,6 +41,66 @@ export function buildRecord(op) {
 
 export const movementsOf = (rec) => rec.lines.filter((l) => l.delta).map((l) => ({ product_id: l.product_id, delta: l.delta }));
 export const reverseMovements = (rec) => movementsOf(rec).map((m) => ({ product_id: m.product_id, delta: -m.delta }));
+
+/**
+ * Costo promedio ponderado: al llegar mercancía a otro precio, el costo del producto pasa a ser el promedio entre lo que
+ * ya había (a su costo) y lo nuevo (a su costo). Si no había existencias (o eran negativas), queda el costo de la compra.
+ */
+export function weightedAverageCost(stock, cost, qty, unitCost) {
+  const held = Math.max(stock, 0);
+  return Math.round((held * cost + qty * unitCost) / (held + qty));
+}
+
+/**
+ * Plan de costos de una compra: por cada línea, cuántas unidades había y a qué costo ANTES, y el costo que queda DESPUÉS
+ * (`details`, en el orden de las líneas), y el costo final por producto (`final`). Varias líneas del mismo producto se aplican en orden.
+ */
+export function purchaseCostPlan(lines, stockOf, costOf) {
+  const stock = {}, cost = {};
+  const details = lines.map((l) => {
+    const stock_before = stock[l.product_id] ?? stockOf(l.product_id);
+    const cost_before = cost[l.product_id] ?? costOf(l.product_id);
+    const cost_after = weightedAverageCost(stock_before, cost_before, l.qty, l.unit_cost);
+    stock[l.product_id] = stock_before + l.qty; cost[l.product_id] = cost_after;
+    return { stock_before, cost_before, cost_after };
+  });
+  return { details, final: cost };
+}
+
+/** Nuevo costo por producto tras una compra (solo los que cambian). */
+export function purchaseCostUpdates(lines, stockOf, costOf) {
+  const { final } = purchaseCostPlan(lines, stockOf, costOf);
+  return Object.fromEntries(Object.entries(final).filter(([id, c]) => c !== costOf(id)));
+}
+
+/**
+ * Al ANULAR una compra: costo que debe quedarle al producto, como si esa compra nunca hubiera existido.
+ * `line` = línea de la compra anulada (con stock_before / cost_before / cost_after guardados al registrarla),
+ * `later` = líneas de compras POSTERIORES no anuladas del mismo producto (en orden), `currentCost` = costo actual.
+ * Devuelve null si no hay que tocar nada: compra sin esos datos, o el costo se cambió a mano después (lo manual manda).
+ */
+export function revertedCost(line, later, currentCost) {
+  if (line.cost_before === undefined || line.cost_after === undefined) return null;
+  const expected = later.length ? later[later.length - 1].cost_after : line.cost_after;
+  if (expected === undefined || currentCost !== expected) return null;
+  let cost = line.cost_before;
+  for (const l of later) {
+    if (l.stock_before === undefined) return null;
+    // Esas compras posteriores se promediaron con existencias que incluían las unidades de la compra anulada: se le restan.
+    cost = weightedAverageCost(Math.max(l.stock_before - line.qty, 0), cost, l.qty, l.unit_cost);
+  }
+  return cost === currentCost ? null : cost;
+}
+
+/**
+ * Líneas de un registro que son ENTRADAS CON COSTO (entran al costo promedio): todas las de una compra, y las entradas de
+ * inventario (delta > 0) que traen `unit_cost`. Se normalizan a {i, product_id, qty, unit_cost, ...detalles guardados}.
+ */
+export function costedEntries(record) {
+  if (record.kind === 'purchase') return record.lines.map((l, i) => ({ ...l, i }));
+  if (record.kind === 'adjustment') return record.lines.map((l, i) => ({ ...l, i, qty: l.delta })).filter((e) => e.qty > 0 && e.unit_cost !== undefined);
+  return [];
+}
 
 export function entityDefaults(type, data) {
   return { ...ENTITY_DEFAULTS[type], ...data };
@@ -97,7 +157,14 @@ export function optimisticEffects(op, view) {
     case OP.STOCK_ADJUST:
     case OP.EXPENSE_CREATE: {
       const record = { ...buildRecord(op), pending: true };
-      return [{ t: 'record', record, movements: movementsOf(record) }];
+      const effects = [{ t: 'record', record, movements: movementsOf(record) }];
+      const entries = costedEntries(record);
+      if (entries.length) {
+        // Igual que hará el servidor: el costo del producto pasa a ser el promedio ponderado (se ve al instante, sin conexión).
+        const updates = purchaseCostUpdates(entries, (id) => view.stock[id] ?? 0, (id) => view.entities.product[id]?.cost ?? 0);
+        for (const [id, cost] of Object.entries(updates)) if (view.entities.product[id]) effects.push({ t: 'entity', entity_type: 'product', id, data: { cost } });
+      }
+      return effects;
     }
     case OP.OP_VOID: {
       const rec = Object.values(view.records).find((r) => r.op_id === op.payload.target_op_id);
