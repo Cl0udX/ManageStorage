@@ -1,6 +1,8 @@
 :root { --tabs-h: calc(64px + env(safe-area-inset-bottom, 0px)); --green: #14532d; --green-fg: #fff; --bg: #f6f7f4; --card: #fff; --fg: #1c1f1a; --muted: #5d625a; --line: #dcdfd6; --warn: #b45309; --bad: #b91c1c; --ok: #15803d; }
 @media (prefers-color-scheme: dark) { :root { --green: #4ade80; --green-fg: #052e16; --bg: #131512; --card: #1b1e19; --fg: #ecefe8; --muted: #a0a69a; --line: #2f342b; --warn: #fbbf24; --bad: #f87171; --ok: #4ade80; } }
 * { box-sizing: border-box; }
+/* El atributo hidden SIEMPRE oculta (si no, cualquier regla con display: flex/grid lo pisa y aparecen cajas vacías). */
+[hidden] { display: none !important; }
 body { margin: 0; font: 18px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
 h1 { font-size: 1.6rem; margin: 0 0 1rem; } h2 { font-size: 1.1rem; margin: 1.25rem 0 .5rem; }
 main { max-width: 640px; margin: 0 auto; padding: 0 1rem calc(var(--tabs-h) + 8.5rem); } /* espacio para la barra de pestañas y la de cobrar */
@@ -94,3 +96,33 @@ input[readonly] { background: transparent; color: var(--muted); border-style: da
 
 /* Lápiz para renombrar (junto al nombre del producto) */
 button.icon { background: transparent; border: 0; min-height: 40px; min-width: 40px; padding: 0; font-size: 1.05rem; line-height: 1; vertical-align: middle; margin-left: .1rem; }
+
+/* Filtros activos del Movimientos: bien visibles para que nunca parezca que "se perdió todo" */
+.activefilters { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .2rem 0 .6rem; padding: .45rem .6rem; border: 1px solid var(--warn); border-radius: 12px; background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.fchip { min-height: 34px; padding: .1rem .7rem; font-size: .9rem; border-radius: 99px; background: var(--card); color: var(--fg); border: 1px solid var(--warn); }
+
+/* Vender: la tarjeta NO cambia de altura con nombres largos; el selector de cantidad siempre va a la derecha */
+.card.sellcard { flex-wrap: nowrap; gap: .5rem; }
+.sellcard .sell-text { flex: 1; min-width: 0; }
+.sellcard .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.25; }
+.sellcard .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sellcard .stepper { flex: 0 0 auto; gap: .3rem; }
+.sellcard .stepper button { width: 44px; min-height: 44px; }
+.sellcard .stepper .qty-input { width: 3.7rem; min-height: 44px; }
+
+/* Productos: filas compactas; al tocar una se despliegan sus acciones */
+.plist { display: grid; gap: .4rem; }
+.prow { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.prow.open { border-color: var(--green); }
+.prow-head { display: flex; align-items: center; }
+.prow-main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .45rem 0 .45rem .8rem; min-height: 56px; cursor: pointer; }
+.prow-text { flex: 1; min-width: 0; }
+.prow .name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow.open .name { white-space: normal; overflow-wrap: anywhere; }
+.prow .meta { color: var(--muted); font-size: .85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow .stock { text-align: right; line-height: 1.1; min-width: 3.2rem; }
+.prow .stock strong { font-size: 1.3rem; } .prow .stock small { display: block; color: var(--muted); font-size: .72rem; }
+.prow.low .stock strong { color: var(--bad); }
+.prow-head > button.icon { flex: 0 0 auto; margin: 0 .2rem; }
+.prow-actions { display: flex; flex-wrap: wrap; gap: .4rem; padding: .5rem .8rem .7rem; border-top: 1px dashed var(--line); }
+#product-count { margin: .2rem 0 .5rem; }

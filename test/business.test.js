@@ -1280,3 +1280,28 @@ test('renombrar un producto (lápiz): el nombre nuevo llega a todos los equipos 
     assert.equal(w.db.prepare("SELECT COUNT(*) c FROM conflicts").get().c, 0);
   } finally { await w.close(); }
 });
+
+test('la pestaña se llama "Movimientos" (no "Historial") y los filtros activos siempre se ven con ✕', () => {
+  const html = readSrc(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('data-tab="history">Movimientos</button>'));
+  assert.ok(html.includes('<h2>Movimientos</h2>'));
+  assert.ok(!/>Historial</.test(html), 'ya no se llama Historial');
+  assert.ok(html.includes('id="history-active"'));
+  const src = readSrc(new URL('../src/client/ui/app.js', import.meta.url), 'utf8');
+  assert.ok(src.includes("history-active") && src.includes('Mostrando solo:') && src.includes('Quitar el filtro'));
+  assert.ok(src.includes('coincidan con el filtro de arriba'), 'el mensaje vacío explica que hay un filtro');
+});
+
+test('vistas: [hidden] siempre oculta, Movimientos limpia el texto al cambiar de pestaña, Productos con buscador y filas compactas, Vender sin saltos de altura', () => {
+  const css = readSrc(new URL('../src/client/ui/app.css', import.meta.url), 'utf8');
+  const html = readSrc(new URL('../public/index.html', import.meta.url), 'utf8');
+  const src = readSrc(new URL('../src/client/ui/app.js', import.meta.url), 'utf8');
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/, 'sin esto, .activefilters{display:flex} pisa hidden y sale una caja vacía');
+  assert.ok(src.includes("historyKind = b.dataset.kind; historySearch = '';"), 'al cambiar de pestaña se quita el filtro de texto');
+  assert.ok(html.includes('id="product-search"') && html.includes('id="product-count"') && html.includes('class="plist"'));
+  assert.ok(src.includes('prow-main') && src.includes('prow-actions') && src.includes('expandedProduct'), 'filas compactas con acciones al tocar');
+  for (const accion of ["'Llegó mercancía'", "'Precio'", "'Movimientos'", "'Quitar'"]) assert.ok(src.slice(src.indexOf('prow-actions')).includes(accion), `no se quita la función ${accion}`);
+  assert.ok(src.includes('pencil(p)'), 'el lápiz de renombrar sigue');
+  assert.match(css, /\.card\.sellcard\s*\{[^}]*flex-wrap:\s*nowrap/, 'la tarjeta de Vender no pasa el selector a otra fila');
+  assert.match(css, /line-clamp:\s*2/, 'nombre largo: máximo 2 líneas');
+});

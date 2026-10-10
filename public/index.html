@@ -55,7 +55,7 @@
       </section>
 
       <section id="tab-history" hidden>
-        <h2>Historial</h2>
+        <h2>Movimientos</h2>
         <div class="segmented" id="history-kind">
           <button type="button" data-kind="sale" class="active">Ventas</button>
           <button type="button" data-kind="merch">Mercancía</button>
@@ -71,13 +71,14 @@
           <label class="datechip" id="history-daychip" title="Elegir un día">📅<span id="history-day-label"></span><input type="date" id="history-day" aria-label="Elegir un día"></label>
         </div>
         <div class="filters">
-          <input id="history-search" type="search" placeholder="🔍 Buscar un producto…" autocomplete="off" aria-label="Buscar en el historial">
+          <input id="history-search" type="search" placeholder="🔍 Buscar un producto…" autocomplete="off" aria-label="Buscar en los movimientos">
           <select id="history-method" aria-label="Forma de pago">
             <option value="all">Todos los pagos</option>
             <option value="pm-cash">💵 Efectivo</option>
             <option value="pm-transfer">🏦 Transferencia</option>
           </select>
         </div>
+        <div id="history-active" class="activefilters" hidden></div>
         <p id="history-summary" class="summary"></p>
         <div id="history"></div>
         <p><button id="history-more" type="button" class="secondary big" hidden>Ver días anteriores</button></p>
@@ -85,7 +86,9 @@
 
       <section id="tab-products" hidden>
         <div class="titlebar"><h2>Productos</h2><button id="add-product" type="button">+ Agregar producto</button></div>
-        <div id="product-list" class="cards"></div>
+        <input id="product-search" type="search" placeholder="🔍 Buscar producto…" autocomplete="off" aria-label="Buscar producto">
+        <p id="product-count" class="muted"></p>
+        <div id="product-list" class="plist"></div>
         <div id="conflicts-box" hidden>
           <h2>Hay que revisar</h2>
           <p class="muted">Dos celulares cambiaron lo mismo sin conexión. Escoge cuál valor queda.</p>
@@ -117,7 +120,7 @@
 
     <nav class="tabs">
       <button type="button" data-tab="sell" class="active">Vender</button>
-      <button type="button" data-tab="history">Historial</button>
+      <button type="button" data-tab="history">Movimientos</button>
       <button type="button" data-tab="products">Productos</button>
       <button type="button" data-tab="profit">Ganancias</button>
     </nav>

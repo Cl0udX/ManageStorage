@@ -34,6 +34,8 @@ const weekCache = new Map(); // semanas más antiguas que lo guardado en el equi
 let searchTerm = '';
 let historyDays = 14;
 const cart = new Map();
+let productSearch = '';      // buscador de la pestaña Productos
+let expandedProduct = null;  // producto con sus acciones desplegadas (uno a la vez)
 let currentView = null; // última vista pintada (para actualizar el total sin redibujar la lista)
 
 const money = (n) => new Intl.NumberFormat(appConfig.locale, { style: 'currency', currency: appConfig.currency, maximumFractionDigits: 0 }).format(n);
@@ -369,8 +371,8 @@ function renderSell(view) {
     input.addEventListener('focus', () => input.select());
     input.addEventListener('input', () => { const n = Number.parseInt(input.value, 10); setCart(p.id, Number.isSafeInteger(n) && n > 0 ? n : 0); updateCheckout(); });
     input.addEventListener('blur', () => { input.value = String(cart.get(p.id) ?? 0); });
-    list.append(el('div', { className: `card ${stock <= 0 ? 'low' : ''}` },
-      el('div', {}, el('div', { className: 'name', textContent: p.name }),
+    list.append(el('div', { className: `card sellcard ${stock <= 0 ? 'low' : ''}` },
+      el('div', { className: 'sell-text' }, el('div', { className: 'name', textContent: p.name, title: p.name }),
         el('div', { className: 'meta' }, `${money(p.price)} · Quedan `, el('span', { className: 'qty', textContent: String(stock) }))),
       el('div', { className: 'stepper' }, btn('−', () => bump(-1), 'secondary'), input, btn('+', () => bump(1)))));
   }
@@ -449,6 +451,19 @@ function renderHistory(view) {
   $('history-day-label').textContent = custom ? ` ${shortDate(periodRange(historyPeriod).from)}` : '';
   $('history-search').placeholder = historyKind === 'expense' ? '🔍 Buscar un gasto…' : '🔍 Buscar un producto…';
 
+  // Filtros activos, SIEMPRE visibles (con ✕ para quitarlos): al pasar de una pestaña a otra el filtro se conserva y, sin esto,
+  // parecería que "se perdieron los datos".
+  const bar = $('history-active'); bar.replaceChildren();
+  const fchip = (text, onClear) => { const b = el('button', { type: 'button', className: 'fchip', textContent: `${text}  ✕`, onclick: onClear }); b.setAttribute('aria-label', `Quitar el filtro ${text}`); return b; };
+  const clearSearch = () => { historySearch = ''; $('history-search').value = ''; render(); };
+  const clearMethod = () => { historyMethod = 'all'; $('history-method').value = 'all'; render(); };
+  const chips = [];
+  if (historySearch.trim()) chips.push(fchip(`🔍 “${historySearch.trim()}”`, clearSearch));
+  if (historyMethod !== 'all') chips.push(fchip(historyMethod === 'pm-cash' ? '💵 Efectivo' : '🏦 Transferencia', clearMethod));
+  bar.hidden = chips.length === 0;
+  if (chips.length) bar.append(el('span', { className: 'muted', textContent: 'Mostrando solo:' }), ...chips,
+    chips.length > 1 ? btn('Quitar todos', () => { historySearch = ''; historyMethod = 'all'; $('history-search').value = ''; $('history-method').value = 'all'; render(); }, 'secondary small') : '');
+
   const range = periodRange(historyPeriod);
   const q = norm(historySearch.trim());
   const text = (r) => (r.kind === 'expense' ? (r.note ?? '') : `${r.lines.map((l) => productName(view, l.product_id)).join(' ')} ${r.kind === 'adjustment' ? adjustLabel(r) : ''}`);
@@ -464,7 +479,7 @@ function renderHistory(view) {
   const parts = Object.entries(byMethod).map(([m, v]) => `${methodName(m)} ${money(v)}`).join(' · ');
   $('history-summary').replaceChildren(el('strong', { textContent: periodLabel() }),
     live.length ? ` · ${live.length} ${live.length === 1 ? one : many}${total ? ` · ${money(total)}${parts ? ` (${parts})` : ''}` : ''}` : '');
-  if (!days.length) box.append(el('p', { className: 'muted', textContent: `No hay ${many} con esos filtros.` }));
+  if (!days.length) box.append(el('p', { className: 'muted', textContent: chips.length ? `No hay ${many} que coincidan con el filtro de arriba en este período. Quítalo con la ✕ para ver todo.` : `No hay ${many} en este período.` }));
 
   const shown = historyPeriod === 'all' ? days.slice(0, historyDays) : days;
   for (const d of shown) {
@@ -533,23 +548,38 @@ async function renameProduct(p) {
 
 function renderProducts(view, st) {
   const list = $('product-list'); list.replaceChildren();
-  for (const p of activeProducts(view)) {
+  const all = activeProducts(view);
+  const q = norm(productSearch.trim());
+  const shown = q ? all.filter((p) => norm(p.name).includes(q)) : all;
+  $('product-count').textContent = !all.length ? '' : q ? `${shown.length} de ${all.length} productos` : `${all.length} ${all.length === 1 ? 'producto' : 'productos'}`;
+  if (all.length && !shown.length) list.append(el('p', { className: 'muted', textContent: `No encontré "${productSearch.trim()}".` }));
+
+  // Filas compactas (una línea de nombre + una de costo/precio + las unidades a la derecha). Al tocar una fila se
+  // despliegan sus acciones. Así caben muchos productos en pantalla sin quitar ninguna función.
+  for (const p of shown) {
     const stock = view.stock[p.id] ?? 0;
-    list.append(el('div', { className: `card ${stock <= 0 ? 'low' : ''}` },
-      el('div', {}, el('div', { className: 'name' }, p.name, pencil(p), p.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''),
-        el('div', { className: 'meta' }, `Nos cuesta ${money(p.cost ?? 0)} · Vendemos ${money(p.price)} · Quedan `, el('span', { className: 'qty', textContent: String(stock) }))),
-      el('div', { className: 'actions' },
+    const isOpen = expandedProduct === p.id;
+    const toggle = () => { expandedProduct = isOpen ? null : p.id; render(); };
+    const main = el('div', { className: 'prow-main', onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
+      el('div', { className: 'prow-text' }, el('div', { className: 'name', title: p.name }, p.name, p.pending ? el('span', { className: 'tag', textContent: ' ⏳' }) : ''),
+        el('div', { className: 'meta', textContent: `Costo ${money(p.cost ?? 0)} · Precio ${money(p.price)}` })),
+      el('div', { className: 'stock' }, el('strong', { textContent: String(stock) }), el('small', { textContent: stock === 1 ? 'queda' : 'quedan' })));
+    main.setAttribute('role', 'button'); main.tabIndex = 0; main.setAttribute('aria-expanded', String(isOpen));
+    const pen = pencil(p); pen.addEventListener('click', (e) => e.stopPropagation()); // el lápiz no despliega la fila
+    list.append(el('div', { className: `prow ${isOpen ? 'open' : ''} ${stock <= 0 ? 'low' : ''}` },
+      el('div', { className: 'prow-head' }, main, pen),
+      isOpen ? el('div', { className: 'prow-actions' },
         btn('Llegó mercancía', () => restock(p), 'small'),
         btn('Precio', () => editProductPrice(p), 'secondary small'),
         btn('Movimientos', () => showProductHistory(p), 'secondary small'),
-        btn('Quitar', () => removeProduct(p), 'secondary small'))));
+        btn('Quitar', () => removeProduct(p), 'secondary small')) : ''));
   }
 
-  const open = Object.values(view.conflicts).filter((c) => c.status === 'open');
-  $('conflicts-box').hidden = open.length === 0;
+  const openConflicts = Object.values(view.conflicts).filter((c) => c.status === 'open');
+  $('conflicts-box').hidden = openConflicts.length === 0;
   const cl = $('conflicts'); cl.replaceChildren();
   const fmt = (c, v) => (c.field === 'name' ? String(v) : money(v));
-  for (const c of open) {
+  for (const c of openConflicts) {
     const li = el('li', {}, el('span', { textContent: `${productName(view, c.entity_id)} · ${FIELD[c.field] ?? c.field}: ahora ${fmt(c, c.server_value)}, otro equipo puso ${fmt(c, c.client_value)}` }));
     if (session?.user.role === 'owner') {
       li.append(el('span', { className: 'actions' }, btn(`Dejar ${fmt(c, c.server_value)}`, () => resolve(c.id, 'server'), 'secondary small'), btn(`Usar ${fmt(c, c.client_value)}`, () => resolve(c.id, 'client'), 'small')));
@@ -730,7 +760,9 @@ $('clock-retry').addEventListener('click', () => guardClock());
 $('cart-clear').addEventListener('click', () => { cart.clear(); render(); });
 $('search').addEventListener('input', (ev) => { searchTerm = ev.target.value; render(); });
 $('history-more').addEventListener('click', () => { historyDays += 14; render(); });
-document.querySelectorAll('#history-kind button').forEach((b) => b.addEventListener('click', () => { historyKind = b.dataset.kind; historyDays = 14; render(); }));
+// Al cambiar entre Ventas / Mercancía / Gastos se quita el filtro de texto (p. ej. el producto con que se llegó desde Productos).
+document.querySelectorAll('#history-kind button').forEach((b) => b.addEventListener('click', () => { historyKind = b.dataset.kind; historySearch = ''; $('history-search').value = ''; historyDays = 14; render(); }));
+$('product-search').addEventListener('input', (e) => { productSearch = e.target.value; expandedProduct = null; render(); });
 document.querySelectorAll('#history-period button').forEach((b) => b.addEventListener('click', () => { historyPeriod = b.dataset.period; $('history-day').value = ''; historyDays = 14; render(); }));
 $('history-day').addEventListener('change', (e) => { historyPeriod = e.target.value || 'week'; render(); });
 $('history-search').addEventListener('input', (e) => { historySearch = e.target.value; render(); });
